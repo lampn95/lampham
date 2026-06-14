@@ -121,9 +121,14 @@ type Level = {
 // ---------------------------- Level ----------------------------
 
 /**
- * Hand-laid stage: two solid ground stretches separated by a water chasm
- * crossed by a bridge, a raised plateau, floating ledges over a second gap,
- * and a final run-up to the boss gate (which doubles as a solid wall).
+ * Hand-laid stage. Every required jump is tuned to the jump arc: with
+ * v0 = -11, g = 0.55 and 3.2 px/frame the player can clear roughly a 128px
+ * gap at the same height (less when landing higher), so all forced gaps are
+ * kept to ~100px and landing spots are never higher than the take-off.
+ *
+ * Layout: Segment A → bridge over the first chasm → Segment B (with a step
+ * plateau) → two ~100px water gaps with a solid landing island between →
+ * Segment C run-up → boss gate (which is also a solid wall).
  */
 function buildLevel(): Level {
   const groundH = VIEW_H - GROUND_Y;
@@ -131,36 +136,36 @@ function buildLevel(): Level {
   const platforms: Platform[] = [
     // Segment A
     { x: 0, y: GROUND_Y, w: 1180, h: groundH },
-    // Bridge across the chasm (same height as ground)
+    // Bridge across the first chasm (contiguous with both segments)
     { x: 1180, y: GROUND_Y, w: 360, h: 12 },
-    // Segment B with a raised plateau
+    // Segment B (ends at 2080) with a step plateau you climb over
     { x: 1540, y: GROUND_Y, w: 540, h: groundH },
-    { x: 1860, y: GROUND_Y - 56, w: 220, h: 56 },   // plateau block (walk onto from right)
-    // Second gap crossed by two floating ledges
-    { x: 2240, y: GROUND_Y - 40, w: 120, h: 14 },
-    { x: 2440, y: GROUND_Y - 78, w: 110, h: 14 },
+    { x: 1860, y: GROUND_Y - 52, w: 150, h: 52 },   // plateau 1860..2010, leaves a 70px ground run-up before the gap
+    // Second chasm: gap1 (2080→2180, 100px) · island (2180..2380) · gap2 (2380→2480, 100px)
+    { x: 2180, y: GROUND_Y, w: 200, h: groundH },    // solid landing island
+    { x: 2230, y: GROUND_Y - 70, w: 90, h: 14 },     // optional high cover ledge on the island
     // Segment C → run-up to boss
-    { x: 2640, y: GROUND_Y, w: 960, h: groundH },
+    { x: 2480, y: GROUND_Y, w: 1120, h: groundH },
     // Boss gate is also a solid wall so you can't run past it
     { x: BOSS_X + 40, y: 120, w: 60, h: GROUND_Y - 120 },
     // Scattered crates for cover / jumping
     { x: 420, y: GROUND_Y - 50, w: 96, h: 14 },
-    { x: 720, y: GROUND_Y - 92, w: 80, h: 14 },
+    { x: 720, y: GROUND_Y - 80, w: 80, h: 14 },
     { x: 980, y: GROUND_Y - 54, w: 110, h: 14 },
-    { x: 2780, y: GROUND_Y - 58, w: 100, h: 14 },
-    { x: 3040, y: GROUND_Y - 96, w: 84, h: 14 },
+    { x: 2700, y: GROUND_Y - 58, w: 100, h: 14 },
+    { x: 3000, y: GROUND_Y - 84, w: 84, h: 14 },
     { x: 3240, y: GROUND_Y - 56, w: 110, h: 14 },
   ];
 
   const water: WaterZone[] = [
-    { x: 1180, y: GROUND_Y + 20, w: 360, h: VIEW_H - GROUND_Y - 20 },
-    { x: 2080, y: GROUND_Y + 20, w: 560, h: VIEW_H - GROUND_Y - 20 },
+    { x: 1180, y: GROUND_Y + 12, w: 360, h: VIEW_H - GROUND_Y - 12 }, // under the bridge (visual)
+    { x: 2080, y: GROUND_Y + 4,  w: 100, h: VIEW_H - GROUND_Y - 4 },  // gap1
+    { x: 2380, y: GROUND_Y + 4,  w: 100, h: VIEW_H - GROUND_Y - 4 },  // gap2
   ];
 
   const turrets: Vec[] = [
     { x: 900,  y: GROUND_Y - 18 },
     { x: 1700, y: GROUND_Y - 18 },
-    { x: 1960, y: GROUND_Y - 56 - 18 }, // on the plateau
     { x: 2900, y: GROUND_Y - 18 },
     { x: 3180, y: GROUND_Y - 18 },
   ];
@@ -327,6 +332,19 @@ export function JungleRunGame() {
       if (player.pos.x < 0) player.pos.x = 0;
       if (player.pos.x > STAGE_W - PLAYER_W) player.pos.x = STAGE_W - PLAYER_W;
       if (player.onGround) lastSafeXRef.current = player.pos.x;
+      // Touching the surface of a water gap (or falling off-screen) costs a
+      // life. Use the body centre so you don't drown at the very lip of a
+      // landing platform.
+      if (!player.onGround) {
+        const feet = player.pos.y + player.h;
+        const cx = player.pos.x + PLAYER_W / 2;
+        for (const w of level.water) {
+          if (cx > w.x && cx < w.x + w.w && feet > w.y) {
+            loseLife();
+            break;
+          }
+        }
+      }
       if (player.pos.y > VIEW_H + 120) loseLife();
 
       // Camera.
@@ -611,7 +629,7 @@ export function JungleRunGame() {
     for (const pl of level.platforms) {
       const x = pl.x - cam;
       if (x + pl.w < 0 || x > VIEW_W) continue;
-      if (pl === level.platforms[7]) continue; // boss wall drawn with boss
+      if (pl.x === BOSS_X + 40) continue; // boss wall is drawn with the boss
       drawTerrain(ctx, x, pl.y, pl.w, pl.h);
     }
 
