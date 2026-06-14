@@ -146,6 +146,71 @@ type Level = {
   stageW: number;        // total horizontal length of this stage
 };
 
+// ---------------------------- Audio ----------------------------
+// All SFX are synthesised at runtime with the Web Audio API — no audio files,
+// nothing copyrighted. A single AudioContext + master gain is created on the
+// first user gesture (autoplay policy).
+
+type Ac = { ctx: AudioContext; master: GainNode };
+type SfxName =
+  | "shoot" | "jump" | "enemyDown" | "playerHit"
+  | "bossHit" | "bossDown" | "bomb" | "clear";
+
+function sfxBlip(
+  ac: Ac, f0: number, f1: number, dur: number, type: OscillatorType, vol: number,
+) {
+  const { ctx, master } = ac;
+  const t = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  const g = ctx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(f0, t);
+  osc.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + 0.006);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.connect(g);
+  g.connect(master);
+  osc.start(t);
+  osc.stop(t + dur + 0.02);
+}
+
+function sfxNoise(ac: Ac, dur: number, freq: number, vol: number) {
+  const { ctx, master } = ac;
+  const t = ctx.currentTime;
+  const n = Math.max(1, Math.floor(ctx.sampleRate * dur));
+  const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const filt = ctx.createBiquadFilter();
+  filt.type = "lowpass";
+  filt.frequency.value = freq;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(filt);
+  filt.connect(g);
+  g.connect(master);
+  src.start(t);
+  src.stop(t + dur);
+}
+
+function playSfxOn(ac: Ac, name: SfxName) {
+  switch (name) {
+    case "shoot":     sfxBlip(ac, 880, 280, 0.08, "square", 0.10); break;
+    case "jump":      sfxBlip(ac, 300, 720, 0.13, "triangle", 0.16); break;
+    case "enemyDown": sfxNoise(ac, 0.18, 1400, 0.22); sfxBlip(ac, 520, 160, 0.12, "square", 0.10); break;
+    case "playerHit": sfxBlip(ac, 420, 60, 0.32, "sawtooth", 0.28); break;
+    case "bossHit":   sfxBlip(ac, 240, 170, 0.05, "square", 0.10); break;
+    case "bossDown":  sfxNoise(ac, 0.6, 600, 0.34); sfxBlip(ac, 200, 50, 0.5, "sawtooth", 0.2); break;
+    case "bomb":      sfxNoise(ac, 0.26, 320, 0.26); break;
+    case "clear":     [523, 659, 784, 1047].forEach((f, i) =>
+                        setTimeout(() => sfxBlip(ac, f, f, 0.14, "triangle", 0.18), i * 90)); break;
+  }
+}
+
 // ---------------------------- Level ----------------------------
 
 /** Small deterministic PRNG so each stage looks the same every visit. */
@@ -283,6 +348,8 @@ export function JungleRunGame() {
   const stageWRef    = useRef(levelRef.current.stageW);
   const bossXRef     = useRef(levelRef.current.bossX);
   const particlesRef = useRef<{ x: number; y: number; vx: number; vy: number; born: number; color: string }[]>([]);
+  const audioRef     = useRef<Ac | null>(null);
+  const mutedRef     = useRef(false);
 
   const [score, setScore]   = useState(0);
   const [lives, setLives]   = useState(START_LIVES);
@@ -295,6 +362,43 @@ export function JungleRunGame() {
   const [cleared, setCleared] = useState(false);
   const [won, setWon]       = useState(false);
   const [mode, setMode]     = useState<Mode>("normal");
+  const [muted, setMuted]   = useState(false);
+
+  // ---------------------------- Audio ----------------------------
+
+  // Lazily build the AudioContext on the first gesture and keep it resumed.
+  const ensureAudio = useCallback(() => {
+    if (mutedRef.current) return;
+    if (!audioRef.current) {
+      try {
+        const ctx = new AudioContext();
+        const master = ctx.createGain();
+        master.gain.value = 0.28;
+        master.connect(ctx.destination);
+        audioRef.current = { ctx, master };
+      } catch {
+        audioRef.current = null;
+      }
+    }
+    if (audioRef.current && audioRef.current.ctx.state === "suspended") {
+      void audioRef.current.ctx.resume();
+    }
+  }, []);
+
+  const playSfx = useCallback((name: SfxName) => {
+    if (mutedRef.current || !audioRef.current) return;
+    try { playSfxOn(audioRef.current, name); } catch { /* ignore audio glitches */ }
+  }, []);
+
+  const toggleMute = useCallback(() => {
+    setMuted((m) => {
+      const next = !m;
+      mutedRef.current = next;
+      if (next && audioRef.current) void audioRef.current.ctx.suspend();
+      else if (!next) ensureAudio();
+      return next;
+    });
+  }, [ensureAudio]);
 
   // ---------------------------- Reset ----------------------------
 
@@ -348,6 +452,7 @@ export function JungleRunGame() {
     const now = performance.now();
     if (now < p.invulnUntil) return;
     p.invulnUntil = now + INVULN_MS;
+    playSfx("playerHit");
 
     spawnParticles(p.pos.x + PLAYER_W / 2, p.pos.y + PLAYER_H / 2, "#fca5a5");
 
@@ -369,7 +474,7 @@ export function JungleRunGame() {
     p.vel.x = 0;
     p.vel.y = 0;
     p.onGround = true;
-  }, [submitBest]);
+  }, [submitBest, playSfx]);
 
   function spawnParticles(x: number, y: number, color: string) {
     for (let i = 0; i < 10; i++) {
@@ -415,6 +520,7 @@ export function JungleRunGame() {
       if (jumpKey && player.onGround && !player.crouch) {
         player.vel.y = PLAYER_JUMP_V;
         player.onGround = false;
+        playSfx("jump");
       }
 
       player.vel.y = Math.min(MAX_FALL, player.vel.y + GRAVITY);
@@ -448,6 +554,7 @@ export function JungleRunGame() {
         spawnBullet(player, now, bulletsRef.current);
         player.lastShotAt = now;
         lastFireRef.current = now;
+        playSfx("shoot");
       }
 
       // Player bullets.
@@ -473,6 +580,7 @@ export function JungleRunGame() {
           const surf = groundTopAt(b.pos.x, level.platforms);
           if (surf != null && b.pos.y >= surf) {
             spawnParticles(b.pos.x, surf, "#fb923c");
+            if (b.pos.x > cam - 20 && b.pos.x < cam + VIEW_W + 20) playSfx("bomb");
             eb.splice(i, 1);
             continue;
           }
@@ -717,6 +825,7 @@ export function JungleRunGame() {
             if (e.hp <= 0) {
               e.alive = false;
               spawnParticles(e.pos.x + ew / 2, e.pos.y + eh / 2, "#fca5a5");
+              playSfx("enemyDown");
               const gain =
                 e.kind === "plane" ? 4 : e.kind === "turret" ? 3 : e.kind === "gunner" ? 2 : 1;
               scoreRef.current += gain;
@@ -735,6 +844,7 @@ export function JungleRunGame() {
             boss.hitFlashUntil = now + 90;
             setBossHp(boss.hp);
             spawnParticles(b.pos.x, b.pos.y, "#fbbf24");
+            playSfx("bossHit");
             if (boss.hp <= 0) {
               boss.alive = false;
               scoreRef.current += 15;
@@ -742,6 +852,8 @@ export function JungleRunGame() {
               for (let k = 0; k < 4; k++) {
                 spawnParticles(boss.x + Math.random() * 44, boss.y + 20 + Math.random() * 50, "#f97316");
               }
+              playSfx("bossDown");
+              setTimeout(() => playSfx("clear"), 350);
               setRunning(false);
               if (stage >= MAX_STAGES) setWon(true);
               else setCleared(true);
@@ -795,7 +907,7 @@ export function JungleRunGame() {
 
       void dt;
     },
-    [stage, submitBest, loseLife, bossActive],
+    [stage, submitBest, loseLife, bossActive, playSfx],
   );
 
   // ---------------------------- Draw ----------------------------
@@ -959,6 +1071,7 @@ export function JungleRunGame() {
       const k = e.key.toLowerCase();
       if (captured.has(k)) e.preventDefault();
       keysRef.current[k] = true;
+      if (captured.has(k) || k === "enter") ensureAudio();
       if (!running && !over && !cleared && !won &&
           (k === "z" || k === "x" || k === " " || k === "arrowright" || k === "d")) {
         setRunning(true);
@@ -975,7 +1088,7 @@ export function JungleRunGame() {
       window.removeEventListener("keydown", onDown);
       window.removeEventListener("keyup", onUp);
     };
-  }, [running, over, cleared, won, resetForStart, resetForNextStage]);
+  }, [running, over, cleared, won, resetForStart, resetForNextStage, ensureAudio]);
 
   // Auto-pause on tab hide / window blur.
   useEffect(() => {
@@ -991,13 +1104,16 @@ export function JungleRunGame() {
 
   const press = useCallback((k: string, down: boolean) => {
     keysRef.current[k] = down;
-    if (down && !running && !over && !cleared && !won) setRunning(true);
-  }, [running, over, cleared, won]);
+    if (down) {
+      ensureAudio();
+      if (!running && !over && !cleared && !won) setRunning(true);
+    }
+  }, [running, over, cleared, won, ensureAudio]);
 
   // ---------------------------- UI ----------------------------
 
-  const handleStart = () => { resetForStart(); setRunning(true); };
-  const handleNextStage = () => { resetForNextStage(); setRunning(true); };
+  const handleStart = () => { ensureAudio(); resetForStart(); setRunning(true); };
+  const handleNextStage = () => { ensureAudio(); resetForNextStage(); setRunning(true); };
   const pickMode = (m: Mode) => { modeRef.current = m; setMode(m); };
 
   // Refs (level, boss, turret flags) are seeded at creation, so the first
@@ -1043,6 +1159,14 @@ export function JungleRunGame() {
           className="rounded-2xl border border-white/10 bg-black/40 shadow-[0_20px_60px_rgba(0,0,0,0.55)] max-w-full touch-none"
           style={{ touchAction: "none", imageRendering: "pixelated" }}
         />
+
+        <button
+          onClick={toggleMute}
+          aria-label={muted ? "Unmute" : "Mute"}
+          className="absolute top-2 right-2 z-10 h-8 w-8 inline-flex items-center justify-center rounded-lg border border-white/15 bg-black/40 text-white/80 hover:text-white hover:bg-black/60 transition-colors text-sm"
+        >
+          {muted ? "🔇" : "🔊"}
+        </button>
 
         {!running && !over && !cleared && !won && (
           <Overlay>
