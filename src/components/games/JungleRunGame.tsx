@@ -269,6 +269,7 @@ export function JungleRunGame() {
   const livesRef     = useRef(START_LIVES);
   const scoreRef     = useRef(0);
   const modeRef      = useRef<Mode>("normal");
+  const stageRef     = useRef(1);
   const stageWRef    = useRef(levelRef.current.stageW);
   const bossXRef     = useRef(levelRef.current.bossX);
   const particlesRef = useRef<{ x: number; y: number; vx: number; vy: number; born: number; color: string }[]>([]);
@@ -315,6 +316,7 @@ export function JungleRunGame() {
     scoreRef.current = 0;
     setScore(0);
     setLives(startLives);
+    stageRef.current = 1;
     setStage(1);
     setOver(false);
     setWon(false);
@@ -322,11 +324,10 @@ export function JungleRunGame() {
   }, [loadStage]);
 
   const resetForNextStage = useCallback(() => {
-    setStage((s) => {
-      const next = s + 1;
-      loadStage(next);
-      return next;
-    });
+    const next = stageRef.current + 1;
+    stageRef.current = next;
+    setStage(next);
+    loadStage(next);
   }, [loadStage]);
 
   // ---------------------------- Damage ----------------------------
@@ -1308,8 +1309,10 @@ function drawPlayer(ctx: CanvasRenderingContext2D, p: Player, cam: number, now: 
   px(ctx, 1, 4, 3, 2, BAND);
   px(ctx, 0, 5, 2, 2, BAND);
 
-  // Arm + gun by aim.
-  if (p.aimUp && p.vel.x === 0) {
+  // Arm + gun by aim. Straight-up only when grounded + still, to match the
+  // bullet direction in spawnBullet (otherwise the sprite points up while the
+  // shot flies diagonally).
+  if (p.aimUp && p.vel.x === 0 && p.onGround) {
     // Straight up.
     px(ctx, 9, 4, 3, 9, VEST);
     px(ctx, 9, 0, 3, 5, GUN);
