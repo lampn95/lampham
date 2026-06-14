@@ -67,8 +67,6 @@ function livesForMode(m: Mode): number {
 }
 const INVULN_MS = 1500;
 
-const BOSS_HP = 24;
-
 const MAX_STAGES = 10;      // ten distinct stages, then a victory screen
 const MAX_GAP = 104;        // widest forced water gap (jump reach is ~128px)
 
@@ -110,13 +108,20 @@ type Enemy = {
   bornAt: number;
 };
 
+type BossKind = "gate" | "hover" | "strider" | "pulser" | "fortress";
+
 type Boss = {
-  x: number;
-  y: number;           // top of the gate column
+  kind: BossKind;
+  x: number;           // current top-left of the core housing (moves)
+  y: number;
+  baseX: number;       // anchor (the fortress wall stays here)
+  baseY: number;
   hp: number;
+  maxHp: number;
   alive: boolean;
   nextShotAt: number;
   hitFlashUntil: number;
+  phase: number;       // movement/attack phase accumulator
 };
 
 type Platform = { x: number; y: number; w: number; h: number };
@@ -253,7 +258,7 @@ export function JungleRunGame() {
   const eBulletsRef  = useRef<Bullet[]>([]);
   const enemiesRef   = useRef<Enemy[]>([]);
   const levelRef     = useRef<Level>(buildLevel(1));
-  const bossRef      = useRef<Boss | null>(makeBoss(levelRef.current.bossX));
+  const bossRef      = useRef<Boss | null>(makeBoss(levelRef.current.bossX, 1));
   const turretsSpawnedRef = useRef<boolean[]>(levelRef.current.turrets.map(() => false));
   const cameraXRef   = useRef(0);
   const keysRef      = useRef<Record<string, boolean>>({});
@@ -272,6 +277,7 @@ export function JungleRunGame() {
   const [lives, setLives]   = useState(START_LIVES);
   const [stage, setStage]   = useState(1);
   const [bossHp, setBossHp] = useState(0);
+  const [bossMax, setBossMax] = useState(bossMaxForStage(1));
   const [bossActive, setBossActive] = useState(false);
   const [running, setRunning] = useState(false);
   const [over, setOver]     = useState(false);
@@ -292,13 +298,14 @@ export function JungleRunGame() {
     stageWRef.current = lvl.stageW;
     bossXRef.current = lvl.bossX;
     turretsSpawnedRef.current = lvl.turrets.map(() => false);
-    bossRef.current = makeBoss(lvl.bossX);
+    bossRef.current = makeBoss(lvl.bossX, stageNum);
     cameraXRef.current = 0;
     lastFireRef.current = 0;
     nextSpawnRef.current = 0;
     lastSafeXRef.current = 30;
     setBossActive(false);
-    setBossHp(BOSS_HP);
+    setBossHp(bossMaxForStage(stageNum));
+    setBossMax(bossMaxForStage(stageNum));
     setCleared(false);
   }, []);
 
@@ -563,20 +570,65 @@ export function JungleRunGame() {
         }
       }
 
-      // Boss update.
+      // Boss update — movement + attack pattern depend on the boss kind.
       const boss = bossRef.current;
-      if (boss && boss.alive) {
-        const onScreen = boss.x < cam + VIEW_W;
-        if (onScreen && !bossActive) setBossActive(true);
-        if (onScreen && now >= boss.nextShotAt) {
-          // Spread of three aimed-ish bullets.
-          const origin = { x: boss.x + 6, y: boss.y + 40 };
+      if (boss && boss.alive && boss.baseX < cam + VIEW_W) {
+        if (!bossActive) setBossActive(true);
+        boss.phase += 0.018 + stage * 0.0015;
+
+        // Movement.
+        switch (boss.kind) {
+          case "hover":
+            boss.y = boss.baseY + Math.sin(boss.phase * 2.0) * 84;
+            boss.x = boss.baseX - 14 + Math.sin(boss.phase) * 16;
+            break;
+          case "strider":
+            boss.x = boss.baseX - 78 + Math.sin(boss.phase * 1.7) * 78;
+            boss.y = boss.baseY + Math.sin(boss.phase * 3.0) * 16;
+            break;
+          case "pulser":
+            boss.y = boss.baseY + Math.sin(boss.phase * 1.4) * 46;
+            break;
+          case "fortress":
+            boss.y = boss.baseY + Math.sin(boss.phase) * 10;
+            break;
+          default: // gate — stationary
+            break;
+        }
+
+        // Attack.
+        if (now >= boss.nextShotAt) {
+          const origin = { x: boss.x + 22, y: boss.y + 46 };
           const target = { x: player.pos.x + PLAYER_W / 2, y: player.pos.y + 10 };
           const base = aimVector(origin, target, ENEMY_BULLET_SPEED);
-          for (const ang of [-0.32, 0, 0.32]) {
-            eb.push({ pos: { ...origin }, vel: rotate(base, ang), bornAt: now });
+          const fire = (v: Vec) => eb.push({ pos: { ...origin }, vel: v, bornAt: now });
+          switch (boss.kind) {
+            case "gate":
+              for (const a of [-0.3, 0, 0.3]) fire(rotate(base, a));
+              boss.nextShotAt = now + Math.max(640, 1100 - stage * 42);
+              break;
+            case "hover":
+              fire(base);
+              boss.nextShotAt = now + Math.max(360, 680 - stage * 26);
+              break;
+            case "strider":
+              for (const a of [-0.16, 0.16]) fire(rotate(base, a));
+              boss.nextShotAt = now + Math.max(500, 880 - stage * 32);
+              break;
+            case "pulser": {
+              const n = 10;
+              for (let k = 0; k < n; k++) {
+                const a = (Math.PI * 2 * k) / n + boss.phase;
+                fire({ x: Math.cos(a) * ENEMY_BULLET_SPEED * 0.85, y: Math.sin(a) * ENEMY_BULLET_SPEED * 0.85 });
+              }
+              boss.nextShotAt = now + Math.max(900, 1500 - stage * 40);
+              break;
+            }
+            case "fortress":
+              for (const a of [-0.5, -0.25, 0, 0.25, 0.5]) fire(rotate(base, a));
+              boss.nextShotAt = now + Math.max(720, 1200 - stage * 42);
+              break;
           }
-          boss.nextShotAt = now + 1100;
         }
       }
 
@@ -783,7 +835,7 @@ export function JungleRunGame() {
     // Progress + boss bar.
     drawStageBar(ctx, playerRef.current.pos.x, stage, stageWRef.current);
     if (boss && boss.alive && boss.x < cam + VIEW_W) {
-      drawBossBar(ctx, boss.hp);
+      drawBossBar(ctx, boss.hp, boss.maxHp, BOSS_LABELS[boss.kind]);
     }
   }, [stage]);
 
@@ -951,11 +1003,11 @@ export function JungleRunGame() {
       {bossActive && bossHp > 0 && !cleared && !won && (
         <div className="mt-3 mx-auto max-w-xs">
           <div className="flex items-center gap-2 text-xs font-mono text-white/60">
-            <span className="text-rose-300">GATE</span>
+            <span className="text-rose-300">{BOSS_LABELS[bossKindForStage(stage)]}</span>
             <div className="flex-1 h-2 rounded-full bg-white/10 overflow-hidden">
               <div
                 className="h-full bg-gradient-to-r from-rose-500 to-orange-400 transition-all"
-                style={{ width: `${(bossHp / BOSS_HP) * 100}%` }}
+                style={{ width: `${(bossHp / bossMax) * 100}%` }}
               />
             </div>
           </div>
@@ -984,14 +1036,39 @@ function makePlayer(): Player {
   };
 }
 
-function makeBoss(bossX: number): Boss {
+// Ten stages cycle through five distinct boss archetypes, each with its own
+// movement + attack pattern. Later stages re-use kinds but hit harder/faster.
+const BOSS_SEQUENCE: BossKind[] = [
+  "gate", "hover", "strider", "pulser", "fortress",
+  "hover", "strider", "pulser", "fortress", "gate",
+];
+function bossKindForStage(stage: number): BossKind {
+  return BOSS_SEQUENCE[(stage - 1) % BOSS_SEQUENCE.length];
+}
+function bossMaxForStage(stage: number): number {
+  return 18 + stage * 3;   // 21 → 48
+}
+const BOSS_LABELS: Record<BossKind, string> = {
+  gate: "GATE CANNON",
+  hover: "HOVER DRONE",
+  strider: "RAIL STRIDER",
+  pulser: "PULSE CORE",
+  fortress: "FORTRESS GUN",
+};
+
+function makeBoss(bossX: number, stage: number): Boss {
   return {
+    kind: bossKindForStage(stage),
     x: bossX,
     y: 150,
-    hp: BOSS_HP,
+    baseX: bossX,
+    baseY: 150,
+    hp: bossMaxForStage(stage),
+    maxHp: bossMaxForStage(stage),
     alive: true,
     nextShotAt: 0,
     hitFlashUntil: 0,
+    phase: 0,
   };
 }
 
@@ -1318,45 +1395,91 @@ function drawTurret(ctx: CanvasRenderingContext2D, x: number, y: number) {
   px(ctx, x + 6, y - 6, 5, 3, "#1e293b");
 }
 
+// Per-kind core palettes: [innerGlow, midGlow(rgb), iris].
+const BOSS_CORE_COLORS: Record<BossKind, [string, string, string]> = {
+  gate:     ["#fde68a", "249,115,22",  "#7c2d12"],
+  hover:    ["#cffafe", "34,211,238",  "#155e75"],
+  strider:  ["#fecaca", "239,68,68",   "#7f1d1d"],
+  pulser:   ["#ede9fe", "167,139,250", "#4c1d95"],
+  fortress: ["#ecfccb", "132,204,22",  "#3f6212"],
+};
+
 function drawBoss(ctx: CanvasRenderingContext2D, boss: Boss, cam: number, now: number) {
-  const x = boss.x - cam;
-  const y = boss.y;
-  // Fortress wall above and below the core.
-  px(ctx, x - 6, 110, 56, GROUND_Y - 110, "#3a4250");
-  px(ctx, x - 6, 110, 56, 6, "#4b5563");
-  // Rivets.
+  // Fortress wall stays anchored at the base (the solid wall), even when the
+  // core itself moves around in front of it.
+  const wallX = boss.baseX - cam;
+  px(ctx, wallX + 34, 110, 60, GROUND_Y - 110, "#3a4250");
+  px(ctx, wallX + 34, 110, 60, 6, "#4b5563");
   ctx.fillStyle = "#1f2733";
   for (let yy = 120; yy < GROUND_Y; yy += 22) {
-    px(ctx, x - 2, yy, 3, 3, "#1f2733");
-    px(ctx, x + 44, yy, 3, 3, "#1f2733");
+    px(ctx, wallX + 38, yy, 3, 3, "#1f2733");
+    px(ctx, wallX + 88, yy, 3, 3, "#1f2733");
   }
-  // Core housing.
-  px(ctx, x - 4, y + 18, 52, 56, "#283041");
-  // Core (glows / flashes when hit).
-  const flash = now < boss.hitFlashUntil;
+
+  // Core (moves with boss.x/boss.y).
+  const x = boss.x - cam;
+  const y = boss.y;
   const coreCx = x + 22;
   const coreCy = y + 46;
+  const flash = now < boss.hitFlashUntil;
+  const [inner, mid, iris] = BOSS_CORE_COLORS[boss.kind];
+
+  // A mount/strut linking the core back to the wall so it doesn't look detached.
+  ctx.strokeStyle = "#283041";
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.moveTo(coreCx, coreCy);
+  ctx.lineTo(wallX + 40, coreCy);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+
+  // Kind-specific flourishes behind the core.
+  if (boss.kind === "pulser") {
+    ctx.strokeStyle = `rgba(${mid},0.5)`;
+    ctx.lineWidth = 3;
+    for (let k = 0; k < 6; k++) {
+      const a = boss.phase + (Math.PI * 2 * k) / 6;
+      ctx.beginPath();
+      ctx.moveTo(coreCx, coreCy);
+      ctx.lineTo(coreCx + Math.cos(a) * 30, coreCy + Math.sin(a) * 30);
+      ctx.stroke();
+    }
+    ctx.lineWidth = 1;
+  } else if (boss.kind === "hover") {
+    // Hover jets underneath.
+    ctx.fillStyle = `rgba(${mid},0.6)`;
+    const j = 6 + Math.abs(Math.sin(now / 60)) * 6;
+    px(ctx, coreCx - 12, coreCy + 18, 5, j, `rgba(${mid},0.6)`);
+    px(ctx, coreCx + 7, coreCy + 18, 5, j, `rgba(${mid},0.6)`);
+  }
+
+  // Core housing.
+  px(ctx, x - 4, y + 24, 52, 44, "#283041");
+
+  // Glowing core.
   const grad = ctx.createRadialGradient(coreCx, coreCy, 2, coreCx, coreCy, 22);
   if (flash) {
     grad.addColorStop(0, "#fff");
     grad.addColorStop(1, "#fca5a5");
   } else {
     const pulse = 0.5 + 0.5 * Math.sin(now / 180);
-    grad.addColorStop(0, "#fde68a");
-    grad.addColorStop(0.6, `rgba(249,115,22,${0.7 + pulse * 0.3})`);
-    grad.addColorStop(1, "#7c2d12");
+    grad.addColorStop(0, inner);
+    grad.addColorStop(0.6, `rgba(${mid},${0.7 + pulse * 0.3})`);
+    grad.addColorStop(1, iris);
   }
   ctx.fillStyle = grad;
   ctx.beginPath();
   ctx.arc(coreCx, coreCy, 20, 0, Math.PI * 2);
   ctx.fill();
-  // Core iris.
-  ctx.fillStyle = flash ? "#ef4444" : "#7c2d12";
+
+  // Iris.
+  ctx.fillStyle = flash ? "#ef4444" : iris;
   ctx.beginPath();
   ctx.arc(coreCx, coreCy, 7, 0, Math.PI * 2);
   ctx.fill();
-  // Muzzle port below core.
-  px(ctx, x - 2, y + 36, 6, 10, "#0f1620");
+
+  // Muzzle port aimed down-left.
+  px(ctx, x - 4, coreCy - 4, 8, 8, "#0f1620");
 }
 
 function drawParallax(
@@ -1426,13 +1549,13 @@ function drawStageBar(ctx: CanvasRenderingContext2D, px0: number, stageN: number
   ctx.textAlign = "left";
 }
 
-function drawBossBar(ctx: CanvasRenderingContext2D, hp: number) {
+function drawBossBar(ctx: CanvasRenderingContext2D, hp: number, max: number, label: string) {
   const barW = 220, barH = 8, x = (VIEW_W - barW) / 2, y = 14;
   ctx.fillStyle = "rgba(0,0,0,0.45)";
   ctx.fillRect(x - 3, y - 3, barW + 6, barH + 6);
   ctx.fillStyle = "rgba(255,255,255,0.12)";
   ctx.fillRect(x, y, barW, barH);
-  const t = Math.max(0, hp / BOSS_HP);
+  const t = Math.max(0, hp / max);
   const grad = ctx.createLinearGradient(x, 0, x + barW, 0);
   grad.addColorStop(0, "#ef4444");
   grad.addColorStop(1, "#f97316");
@@ -1441,7 +1564,7 @@ function drawBossBar(ctx: CanvasRenderingContext2D, hp: number) {
   ctx.fillStyle = "#fecaca";
   ctx.font = "9px monospace";
   ctx.textAlign = "center";
-  ctx.fillText("GATE CORE", VIEW_W / 2, y + barH + 10);
+  ctx.fillText(label, VIEW_W / 2, y + barH + 10);
   ctx.textAlign = "left";
 }
 
