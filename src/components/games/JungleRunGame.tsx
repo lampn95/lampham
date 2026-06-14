@@ -58,6 +58,14 @@ const ENEMY_BULLET_LIFE_MS = 2600;
 const SPAWN_INTERVAL_MIN_MS = 1100;
 const SPAWN_INTERVAL_MAX_MS = 1900;
 
+// Bombing planes show up on the higher stages and strafe overhead.
+const PLANE_MIN_STAGE = 4;
+const PLANE_W = 38;
+const PLANE_H = 14;
+const PLANE_SPEED = 2.7;
+const PLANE_HP = 2;
+const BOMB_GRAVITY = 0.22;
+
 const START_LIVES = 3;       // Normal mode
 const FUNNY_LIVES = 1000;    // "Super Funny" test mode
 
@@ -91,9 +99,10 @@ type Bullet = {
   pos: Vec;
   vel: Vec;
   bornAt: number;
+  grav?: boolean;   // gravity-affected (dropped bombs)
 };
 
-type EnemyKind = "runner" | "gunner" | "turret";
+type EnemyKind = "runner" | "gunner" | "turret" | "plane";
 
 type Enemy = {
   kind: EnemyKind;
@@ -264,6 +273,7 @@ export function JungleRunGame() {
   const keysRef      = useRef<Record<string, boolean>>({});
   const lastFireRef  = useRef(0);
   const nextSpawnRef = useRef(0);
+  const nextPlaneRef = useRef(0);
   const lastFrameRef = useRef(0);
   const lastSafeXRef = useRef(30);
   const livesRef     = useRef(START_LIVES);
@@ -303,6 +313,7 @@ export function JungleRunGame() {
     cameraXRef.current = 0;
     lastFireRef.current = 0;
     nextSpawnRef.current = 0;
+    nextPlaneRef.current = 0;
     lastSafeXRef.current = 30;
     setBossActive(false);
     setBossHp(bossMaxForStage(stageNum));
@@ -450,12 +461,22 @@ export function JungleRunGame() {
         }
       }
 
-      // Enemy bullets.
+      // Enemy bullets (and gravity bombs dropped by planes).
       const eb = eBulletsRef.current;
       for (let i = eb.length - 1; i >= 0; i--) {
         const b = eb[i];
+        if (b.grav) b.vel.y = Math.min(8, b.vel.y + BOMB_GRAVITY);
         b.pos.x += b.vel.x;
         b.pos.y += b.vel.y;
+        // Bombs burst on the ground surface.
+        if (b.grav) {
+          const surf = groundTopAt(b.pos.x, level.platforms);
+          if (surf != null && b.pos.y >= surf) {
+            spawnParticles(b.pos.x, surf, "#fb923c");
+            eb.splice(i, 1);
+            continue;
+          }
+        }
         if (now - b.bornAt > ENEMY_BULLET_LIFE_MS || b.pos.x < -40 || b.pos.x > stageW + 40 || b.pos.y > VIEW_H + 40) {
           eb.splice(i, 1);
         }
@@ -509,6 +530,29 @@ export function JungleRunGame() {
         nextSpawnRef.current = now + (SPAWN_INTERVAL_MIN_MS + Math.random() * range) * stageScale;
       }
 
+      // Bombing planes strafe in from the right on the higher stages.
+      if (stage >= PLANE_MIN_STAGE && !bossOnScreen && now >= nextPlaneRef.current) {
+        if (nextPlaneRef.current === 0) {
+          // First plane gets a grace delay so the stage doesn't open with bombs.
+          nextPlaneRef.current = now + 4000;
+        } else {
+          enemiesRef.current.push({
+            kind: "plane",
+            pos: { x: cam + VIEW_W + 40, y: 36 + Math.random() * 34 },
+            vel: { x: -PLANE_SPEED, y: 0 },
+            alive: true,
+            baseY: 0,
+            hp: PLANE_HP,
+            nextShotAt: now + 500 + Math.random() * 500, // first bomb timer
+            walkPhase: 0,
+            onGround: false,
+            bornAt: now,
+          });
+          const planeGap = Math.max(2600, 6000 - stage * 300);
+          nextPlaneRef.current = now + planeGap + Math.random() * 1500;
+        }
+      }
+
       // Enemy update.
       const enemies = enemiesRef.current;
       for (let i = enemies.length - 1; i >= 0; i--) {
@@ -525,6 +569,28 @@ export function JungleRunGame() {
             );
             eb.push({ pos: { x: e.pos.x + 8, y: e.pos.y }, vel: v, bornAt: now });
             e.nextShotAt = now + 1500 + Math.random() * 700;
+          }
+          continue;
+        }
+
+        if (e.kind === "plane") {
+          // Flies straight across (no gravity); drops gravity bombs when it's
+          // roughly overhead. Wobbles a touch for character.
+          e.pos.x += e.vel.x;
+          e.walkPhase += 0.12;
+          e.pos.y += Math.sin(e.walkPhase) * 0.4;
+          const overhead = Math.abs(e.pos.x + PLANE_W / 2 - (player.pos.x + PLAYER_W / 2)) < 220;
+          if (now >= e.nextShotAt && overhead && e.pos.x < cam + VIEW_W) {
+            eb.push({
+              pos: { x: e.pos.x + PLANE_W / 2, y: e.pos.y + PLANE_H },
+              vel: { x: e.vel.x * 0.35, y: 1 },
+              bornAt: now,
+              grav: true,
+            });
+            e.nextShotAt = now + 650 + Math.random() * 500;
+          }
+          if (e.pos.x + PLANE_W < cam - 160 || now - e.bornAt > ENEMY_LIFETIME_MS) {
+            enemies.splice(i, 1);
           }
           continue;
         }
@@ -640,14 +706,20 @@ export function JungleRunGame() {
         for (let j = enemies.length - 1; j >= 0; j--) {
           const e = enemies[j];
           if (!e.alive) continue;
-          if (b.pos.x >= e.pos.x && b.pos.x <= e.pos.x + ENEMY_W &&
-              b.pos.y >= e.pos.y && b.pos.y <= e.pos.y + ENEMY_H) {
-            e.alive = false;
+          const { w: ew, h: eh } = enemyDims(e.kind);
+          if (b.pos.x >= e.pos.x && b.pos.x <= e.pos.x + ew &&
+              b.pos.y >= e.pos.y && b.pos.y <= e.pos.y + eh) {
             consumed = true;
-            spawnParticles(e.pos.x + ENEMY_W / 2, e.pos.y + ENEMY_H / 2, "#fca5a5");
-            const gain = e.kind === "turret" ? 3 : e.kind === "gunner" ? 2 : 1;
-            scoreRef.current += gain;
-            setScore(scoreRef.current);
+            e.hp -= 1;
+            spawnParticles(b.pos.x, b.pos.y, e.kind === "plane" ? "#fbbf24" : "#fca5a5");
+            if (e.hp <= 0) {
+              e.alive = false;
+              spawnParticles(e.pos.x + ew / 2, e.pos.y + eh / 2, "#fca5a5");
+              const gain =
+                e.kind === "plane" ? 4 : e.kind === "turret" ? 3 : e.kind === "gunner" ? 2 : 1;
+              scoreRef.current += gain;
+              setScore(scoreRef.current);
+            }
             break;
           }
         }
@@ -700,8 +772,9 @@ export function JungleRunGame() {
         const pY = player.pos.y;
         for (const e of enemies) {
           if (!e.alive) continue;
-          if (player.pos.x < e.pos.x + ENEMY_W && player.pos.x + PLAYER_W > e.pos.x &&
-              pY < e.pos.y + ENEMY_H && pY + pH > e.pos.y) {
+          const { w: ew, h: eh } = enemyDims(e.kind);
+          if (player.pos.x < e.pos.x + ew && player.pos.x + PLAYER_W > e.pos.x &&
+              pY < e.pos.y + eh && pY + pH > e.pos.y) {
             loseLife();
             break;
           }
@@ -788,6 +861,7 @@ export function JungleRunGame() {
     for (const e of enemiesRef.current) {
       if (!e.alive) continue;
       if (e.kind === "turret") drawTurret(ctx, e.pos.x - cam, e.pos.y);
+      else if (e.kind === "plane") drawPlane(ctx, e.pos.x - cam, e.pos.y, now);
       else drawEnemy(ctx, e.pos.x - cam, e.pos.y, e.kind, e.walkPhase, e.vel.x);
     }
 
@@ -808,17 +882,29 @@ export function JungleRunGame() {
       ctx.fillStyle = "#fde047";
     }
 
-    // Enemy bullets.
+    // Enemy bullets + dropped bombs.
     for (const b of eBulletsRef.current) {
       const bx = b.pos.x - cam;
-      ctx.fillStyle = "#fb923c";
-      ctx.beginPath();
-      ctx.arc(bx, b.pos.y, 3.4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "rgba(254,215,170,0.6)";
-      ctx.beginPath();
-      ctx.arc(bx, b.pos.y, 1.6, 0, Math.PI * 2);
-      ctx.fill();
+      if (b.grav) {
+        // Bomb: dark teardrop body + tail fins.
+        ctx.fillStyle = "#1f2733";
+        ctx.beginPath();
+        ctx.ellipse(bx, b.pos.y, 3.5, 5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#475569";
+        ctx.fillRect(bx - 3, b.pos.y - 6, 6, 2);   // fin
+        ctx.fillStyle = "#f59e0b";
+        ctx.fillRect(bx - 1, b.pos.y + 3, 2, 2);   // warning tip
+      } else {
+        ctx.fillStyle = "#fb923c";
+        ctx.beginPath();
+        ctx.arc(bx, b.pos.y, 3.4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "rgba(254,215,170,0.6)";
+        ctx.beginPath();
+        ctx.arc(bx, b.pos.y, 1.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
 
     // Particles.
@@ -1111,6 +1197,11 @@ function aabb(x: number, y: number, w: number, h: number, pl: Platform): boolean
   return x < pl.x + pl.w && x + w > pl.x && y < pl.y + pl.h && y + h > pl.y;
 }
 
+/** Hitbox size per enemy kind (planes are wider/flatter). */
+function enemyDims(kind: EnemyKind): { w: number; h: number } {
+  return kind === "plane" ? { w: PLANE_W, h: PLANE_H } : { w: ENEMY_W, h: ENEMY_H };
+}
+
 /** Top surface (smallest y) of any platform covering x, or null over a gap. */
 function groundTopAt(x: number, platforms: Platform[]): number | null {
   let top: number | null = null;
@@ -1396,6 +1487,50 @@ function drawTurret(ctx: CanvasRenderingContext2D, x: number, y: number) {
   // Barrel.
   px(ctx, x + 6, y - 4, 5, 8, "#334155");
   px(ctx, x + 6, y - 6, 5, 3, "#1e293b");
+}
+
+function drawPlane(ctx: CanvasRenderingContext2D, x: number, y: number, now: number) {
+  // Flies leftward; nose points left. Fuselage + wing + tail + spinning prop.
+  const cy = y + PLANE_H / 2;
+  // Fuselage.
+  ctx.fillStyle = "#4b5563";
+  ctx.beginPath();
+  ctx.moveTo(x, cy);                       // nose (left)
+  ctx.lineTo(x + 10, y);
+  ctx.lineTo(x + PLANE_W, y + 2);
+  ctx.lineTo(x + PLANE_W, y + PLANE_H - 2);
+  ctx.lineTo(x + 10, y + PLANE_H);
+  ctx.closePath();
+  ctx.fill();
+  // Top highlight + belly shadow.
+  px(ctx, x + 10, y + 1, PLANE_W - 12, 2, "#6b7689");
+  px(ctx, x + 10, y + PLANE_H - 3, PLANE_W - 12, 2, "#374151");
+  // Cockpit glass.
+  ctx.fillStyle = "#7dd3fc";
+  px(ctx, x + 12, y + 2, 8, 4, "#7dd3fc");
+  // Tail fin.
+  ctx.fillStyle = "#374151";
+  ctx.beginPath();
+  ctx.moveTo(x + PLANE_W - 2, y);
+  ctx.lineTo(x + PLANE_W + 6, y - 6);
+  ctx.lineTo(x + PLANE_W + 6, y + 4);
+  ctx.closePath();
+  ctx.fill();
+  // Wing (under fuselage, swept).
+  px(ctx, x + 14, cy + 2, 16, 3, "#39424f");
+  // Red marking.
+  px(ctx, x + 22, y + 4, 4, 4, "#ef4444");
+  // Spinning prop at the nose.
+  const spin = Math.sin(now / 18) * 6;
+  ctx.strokeStyle = "rgba(203,213,225,0.8)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x - 1, cy - spin);
+  ctx.lineTo(x - 1, cy + spin);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+  ctx.fillStyle = "#1e293b";
+  ctx.fillRect(x - 2, cy - 1, 3, 2);
 }
 
 // Per-kind core palettes: [innerGlow, midGlow(rgb), iris].
