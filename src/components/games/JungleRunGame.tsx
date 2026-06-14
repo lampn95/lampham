@@ -31,7 +31,6 @@ import { GameShell, ScoreBar, useBestScore } from "./GameShell";
 const VIEW_W = 800;
 const VIEW_H = 360;
 const GROUND_Y = 296;              // top of the main ground band
-const STAGE_W = 3600;              // total horizontal stage length
 
 const PLAYER_W = 16;
 const PLAYER_H = 32;
@@ -49,6 +48,9 @@ const ENEMY_W = 16;
 const ENEMY_H = 28;
 const RUNNER_SPEED = 1.5;
 const GUNNER_SPEED = 1.0;
+const ENEMY_GRAVITY = 0.5;
+const ENEMY_MAX_FALL = 12;
+const ENEMY_LIFETIME_MS = 16000;   // hard cap so stuck enemies don't linger
 
 const ENEMY_BULLET_SPEED = 4.2;
 const ENEMY_BULLET_LIFE_MS = 2600;
@@ -66,7 +68,9 @@ function livesForMode(m: Mode): number {
 const INVULN_MS = 1500;
 
 const BOSS_HP = 24;
-const BOSS_X = 3460;
+
+const MAX_STAGES = 10;      // ten distinct stages, then a victory screen
+const MAX_GAP = 104;        // widest forced water gap (jump reach is ~128px)
 
 // ---------------------------- Types ----------------------------
 
@@ -102,6 +106,8 @@ type Enemy = {
   hp: number;
   nextShotAt: number;
   walkPhase: number;
+  onGround: boolean;
+  bornAt: number;
 };
 
 type Boss = {
@@ -122,67 +128,112 @@ type Level = {
   water: WaterZone[];
   turrets: Vec[];        // spawn points for ground turrets
   trees: Tree[];
+  bossX: number;         // x of the boss gate core column
+  stageW: number;        // total horizontal length of this stage
 };
 
 // ---------------------------- Level ----------------------------
 
+/** Small deterministic PRNG so each stage looks the same every visit. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 /**
- * Hand-laid stage. Every required jump is tuned to the jump arc: with
- * v0 = -11, g = 0.55 and 3.2 px/frame the player can clear roughly a 128px
- * gap at the same height (less when landing higher), so all forced gaps are
- * kept to ~100px and landing spots are never higher than the take-off.
+ * Procedurally lays out one of MAX_STAGES distinct stages, seeded by the
+ * stage number (so stage 2 never looks like stage 1). Difficulty ramps with
+ * the stage: more water gaps, more turrets, longer run.
  *
- * Layout: Segment A → bridge over the first chasm → Segment B (with a step
- * plateau) → two ~100px water gaps with a solid landing island between →
- * Segment C run-up → boss gate (which is also a solid wall).
+ * Jump budget: v0 = -11, g = 0.55, 3.2 px/frame ⇒ ~128px reach at the same
+ * height. Every forced gap is capped at MAX_GAP (104px) and every landing
+ * island sits at ground level, so no jump is ever impossible.
  */
-function buildLevel(): Level {
+function buildLevel(stage: number): Level {
   const groundH = VIEW_H - GROUND_Y;
+  const rng = mulberry32(0x9e3779b9 ^ (stage * 0x85ebca6b));
+  const rand = (a: number, b: number) => a + rng() * (b - a);
+  const randInt = (a: number, b: number) => Math.round(rand(a, b));
 
-  const platforms: Platform[] = [
-    // Segment A
-    { x: 0, y: GROUND_Y, w: 1180, h: groundH },
-    // Bridge across the first chasm (contiguous with both segments)
-    { x: 1180, y: GROUND_Y, w: 360, h: 12 },
-    // Segment B (ends at 2080) with a step plateau you climb over
-    { x: 1540, y: GROUND_Y, w: 540, h: groundH },
-    { x: 1860, y: GROUND_Y - 52, w: 150, h: 52 },   // plateau 1860..2010, leaves a 70px ground run-up before the gap
-    // Second chasm: gap1 (2080→2180, 100px) · island (2180..2380) · gap2 (2380→2480, 100px)
-    { x: 2180, y: GROUND_Y, w: 200, h: groundH },    // solid landing island
-    { x: 2230, y: GROUND_Y - 70, w: 90, h: 14 },     // optional high cover ledge on the island
-    // Segment C → run-up to boss
-    { x: 2480, y: GROUND_Y, w: 1120, h: groundH },
-    // Boss gate is also a solid wall so you can't run past it
-    { x: BOSS_X + 40, y: 120, w: 60, h: GROUND_Y - 120 },
-    // Scattered crates for cover / jumping
-    { x: 420, y: GROUND_Y - 50, w: 96, h: 14 },
-    { x: 720, y: GROUND_Y - 80, w: 80, h: 14 },
-    { x: 980, y: GROUND_Y - 54, w: 110, h: 14 },
-    { x: 2700, y: GROUND_Y - 58, w: 100, h: 14 },
-    { x: 3000, y: GROUND_Y - 84, w: 84, h: 14 },
-    { x: 3240, y: GROUND_Y - 56, w: 110, h: 14 },
-  ];
+  const platforms: Platform[] = [];
+  const water: WaterZone[] = [];
+  const turrets: Vec[] = [];
 
-  const water: WaterZone[] = [
-    { x: 1180, y: GROUND_Y + 12, w: 360, h: VIEW_H - GROUND_Y - 12 }, // under the bridge (visual)
-    { x: 2080, y: GROUND_Y + 4,  w: 100, h: VIEW_H - GROUND_Y - 4 },  // gap1
-    { x: 2380, y: GROUND_Y + 4,  w: 100, h: VIEW_H - GROUND_Y - 4 },  // gap2
-  ];
+  const ledgeOffsets = [42, 56, 72, 86];
+  const numGaps = Math.min(2 + Math.floor(stage / 2), 6);  // 2 → 6 gaps
+  const turretBias = 0.32 + stage * 0.05;
 
-  const turrets: Vec[] = [
-    { x: 900,  y: GROUND_Y - 18 },
-    { x: 1700, y: GROUND_Y - 18 },
-    { x: 2900, y: GROUND_Y - 18 },
-    { x: 3180, y: GROUND_Y - 18 },
-  ];
+  let x = 0;
 
-  // Deterministic-ish tree line for the mid parallax band.
-  const trees: Tree[] = [];
-  for (let i = 0; i < 60; i++) {
-    trees.push({ x: i * 70, h: 26 + ((i * 37) % 18) });
+  // Opening safe run-up (no enemies/turrets right at the spawn).
+  let segW = randInt(360, 480);
+  platforms.push({ x, y: GROUND_Y, w: segW, h: groundH });
+  if (rng() < 0.7) {
+    const lw = randInt(80, 120);
+    platforms.push({ x: x + randInt(120, segW - lw - 20), y: GROUND_Y - ledgeOffsets[randInt(0, 2)], w: lw, h: 14 });
+  }
+  x += segW;
+
+  for (let g = 0; g < numGaps; g++) {
+    // Water gap.
+    const gap = randInt(80, MAX_GAP);
+    water.push({ x, y: GROUND_Y + 4, w: gap, h: VIEW_H - GROUND_Y - 4 });
+    x += gap;
+
+    // Solid landing island at ground level (always reachable).
+    segW = randInt(220, 400);
+    platforms.push({ x, y: GROUND_Y, w: segW, h: groundH });
+
+    // Optional elevated ledge / crate for cover + verticality.
+    if (rng() < 0.6) {
+      const lw = randInt(70, 120);
+      const maxStart = Math.max(20, segW - lw - 20);
+      platforms.push({
+        x: x + randInt(20, maxStart),
+        y: GROUND_Y - ledgeOffsets[randInt(0, ledgeOffsets.length - 1)],
+        w: lw, h: 14,
+      });
+    }
+    // Turret on this island (scales with stage).
+    if (rng() < turretBias) {
+      turrets.push({ x: x + randInt(40, segW - 40), y: GROUND_Y - 18 });
+    }
+    x += segW;
   }
 
-  return { platforms, water, turrets, trees };
+  // Final run-up to the boss.
+  const bossRunW = randInt(360, 460);
+  platforms.push({ x, y: GROUND_Y, w: bossRunW, h: groundH });
+  if (rng() < 0.6) {
+    platforms.push({ x: x + randInt(60, bossRunW - 140), y: GROUND_Y - ledgeOffsets[randInt(0, 2)], w: 90, h: 14 });
+  }
+  if (rng() < turretBias) {
+    turrets.push({ x: x + randInt(60, bossRunW - 80), y: GROUND_Y - 18 });
+  }
+  const bossX = x + bossRunW - 40;
+  x += bossRunW;
+
+  // Boss gate doubles as a solid wall.
+  platforms.push({ x: bossX + 40, y: 120, w: 60, h: GROUND_Y - 120 });
+  const stageW = bossX + 100;
+
+  // An early turret on the opening segment from stage 2 onward.
+  if (stage >= 2) turrets.unshift({ x: randInt(560, 760), y: GROUND_Y - 18 });
+
+  // Deterministic tree line for the mid parallax band, sized to the stage.
+  const trees: Tree[] = [];
+  const treeCount = Math.ceil(stageW / 70) + 2;
+  for (let i = 0; i < treeCount; i++) {
+    trees.push({ x: i * 70, h: 26 + ((i * 37 + stage * 11) % 18) });
+  }
+
+  return { platforms, water, turrets, trees, bossX, stageW };
 }
 
 // ---------------------------- Component ----------------------------
@@ -200,8 +251,8 @@ export function JungleRunGame() {
   const bulletsRef   = useRef<Bullet[]>([]);
   const eBulletsRef  = useRef<Bullet[]>([]);
   const enemiesRef   = useRef<Enemy[]>([]);
-  const bossRef      = useRef<Boss | null>(makeBoss());
-  const levelRef     = useRef<Level>(buildLevel());
+  const levelRef     = useRef<Level>(buildLevel(1));
+  const bossRef      = useRef<Boss | null>(makeBoss(levelRef.current.bossX));
   const turretsSpawnedRef = useRef<boolean[]>(levelRef.current.turrets.map(() => false));
   const cameraXRef   = useRef(0);
   const keysRef      = useRef<Record<string, boolean>>({});
@@ -212,6 +263,8 @@ export function JungleRunGame() {
   const livesRef     = useRef(START_LIVES);
   const scoreRef     = useRef(0);
   const modeRef      = useRef<Mode>("normal");
+  const stageWRef    = useRef(levelRef.current.stageW);
+  const bossXRef     = useRef(levelRef.current.bossX);
   const particlesRef = useRef<{ x: number; y: number; vx: number; vy: number; born: number; color: string }[]>([]);
 
   const [score, setScore]   = useState(0);
@@ -222,19 +275,23 @@ export function JungleRunGame() {
   const [running, setRunning] = useState(false);
   const [over, setOver]     = useState(false);
   const [cleared, setCleared] = useState(false);
+  const [won, setWon]       = useState(false);
   const [mode, setMode]     = useState<Mode>("normal");
 
   // ---------------------------- Reset ----------------------------
 
-  const loadStage = useCallback(() => {
+  const loadStage = useCallback((stageNum: number) => {
     playerRef.current = makePlayer();
     bulletsRef.current = [];
     eBulletsRef.current = [];
     enemiesRef.current = [];
     particlesRef.current = [];
-    levelRef.current = buildLevel();
-    turretsSpawnedRef.current = levelRef.current.turrets.map(() => false);
-    bossRef.current = makeBoss();
+    const lvl = buildLevel(stageNum);
+    levelRef.current = lvl;
+    stageWRef.current = lvl.stageW;
+    bossXRef.current = lvl.bossX;
+    turretsSpawnedRef.current = lvl.turrets.map(() => false);
+    bossRef.current = makeBoss(lvl.bossX);
     cameraXRef.current = 0;
     lastFireRef.current = 0;
     nextSpawnRef.current = 0;
@@ -252,12 +309,16 @@ export function JungleRunGame() {
     setLives(startLives);
     setStage(1);
     setOver(false);
-    loadStage();
+    setWon(false);
+    loadStage(1);
   }, [loadStage]);
 
   const resetForNextStage = useCallback(() => {
-    setStage((s) => s + 1);
-    loadStage();
+    setStage((s) => {
+      const next = s + 1;
+      loadStage(next);
+      return next;
+    });
   }, [loadStage]);
 
   // ---------------------------- Damage ----------------------------
@@ -311,6 +372,7 @@ export function JungleRunGame() {
       const player = playerRef.current;
       const keys = keysRef.current;
       const level = levelRef.current;
+      const stageW = stageWRef.current;
 
       const leftKey  = keys["arrowleft"]  || keys["a"];
       const rightKey = keys["arrowright"] || keys["d"];
@@ -339,7 +401,7 @@ export function JungleRunGame() {
       moveAndCollide(player, level.platforms);
 
       if (player.pos.x < 0) player.pos.x = 0;
-      if (player.pos.x > STAGE_W - PLAYER_W) player.pos.x = STAGE_W - PLAYER_W;
+      if (player.pos.x > stageW - PLAYER_W) player.pos.x = stageW - PLAYER_W;
       if (player.onGround) lastSafeXRef.current = player.pos.x;
       // Touching the surface of a water gap (or falling off-screen) costs a
       // life. Use the body centre so you don't drown at the very lip of a
@@ -358,7 +420,7 @@ export function JungleRunGame() {
 
       // Camera.
       const wantCam = player.pos.x - VIEW_W * 0.38;
-      cameraXRef.current = Math.max(0, Math.min(STAGE_W - VIEW_W, wantCam));
+      cameraXRef.current = Math.max(0, Math.min(stageW - VIEW_W, wantCam));
       const cam = cameraXRef.current;
 
       // Fire.
@@ -374,7 +436,7 @@ export function JungleRunGame() {
         const b = bullets[i];
         b.pos.x += b.vel.x;
         b.pos.y += b.vel.y;
-        if (now - b.bornAt > BULLET_LIFE_MS || b.pos.x < -20 || b.pos.x > STAGE_W + 20) {
+        if (now - b.bornAt > BULLET_LIFE_MS || b.pos.x < -20 || b.pos.x > stageW + 20) {
           bullets.splice(i, 1);
         }
       }
@@ -385,7 +447,7 @@ export function JungleRunGame() {
         const b = eb[i];
         b.pos.x += b.vel.x;
         b.pos.y += b.vel.y;
-        if (now - b.bornAt > ENEMY_BULLET_LIFE_MS || b.pos.x < -40 || b.pos.x > STAGE_W + 40 || b.pos.y > VIEW_H + 40) {
+        if (now - b.bornAt > ENEMY_BULLET_LIFE_MS || b.pos.x < -40 || b.pos.x > stageW + 40 || b.pos.y > VIEW_H + 40) {
           eb.splice(i, 1);
         }
       }
@@ -404,26 +466,33 @@ export function JungleRunGame() {
             hp: 1,
             nextShotAt: now + 600 + Math.random() * 600,
             walkPhase: 0,
+            onGround: true,
+            bornAt: now,
           });
         }
       });
 
       // Spawn walking enemies from the right (stop once boss is on screen).
+      // Only spawn where there's solid ground just off the right edge so they
+      // don't materialise mid-air over a chasm.
       const bossOnScreen = bossRef.current && bossRef.current.x < cam + VIEW_W;
       const walkers = enemiesRef.current.filter((e) => e.kind !== "turret").length;
       if (!bossOnScreen && now >= nextSpawnRef.current && walkers < 5) {
         const kind: EnemyKind = Math.random() < 0.45 ? "gunner" : "runner";
         const x = cam + VIEW_W + 24 + Math.random() * 60;
-        if (x < STAGE_W - 40) {
+        const groundTop = groundTopAt(x + ENEMY_W / 2, level.platforms);
+        if (x < stageW - 40 && groundTop != null) {
           enemiesRef.current.push({
             kind,
-            pos: { x, y: GROUND_Y - ENEMY_H },
+            pos: { x, y: groundTop - ENEMY_H },
             vel: { x: -(kind === "runner" ? RUNNER_SPEED : GUNNER_SPEED), y: 0 },
             alive: true,
-            baseY: GROUND_Y - ENEMY_H,
+            baseY: groundTop - ENEMY_H,
             hp: 1,
             nextShotAt: now + 700 + Math.random() * 800,
             walkPhase: 0,
+            onGround: true,
+            bornAt: now,
           });
         }
         const range = SPAWN_INTERVAL_MAX_MS - SPAWN_INTERVAL_MIN_MS;
@@ -437,27 +506,8 @@ export function JungleRunGame() {
         const e = enemies[i];
         if (!e.alive) { enemies.splice(i, 1); continue; }
 
-        if (e.kind === "runner") {
-          e.pos.x += e.vel.x;
-          e.walkPhase += 0.3;
-          e.pos.y = e.baseY + Math.abs(Math.sin(e.walkPhase)) * -1.5;
-        } else if (e.kind === "gunner") {
-          // Walk in, then stop within firing range and shoot.
-          const dx = player.pos.x - e.pos.x;
-          if (Math.abs(dx) > 220) {
-            e.pos.x += e.vel.x;
-            e.walkPhase += 0.26;
-          } else if (now >= e.nextShotAt && e.pos.x < cam + VIEW_W) {
-            const dir = dx >= 0 ? 1 : -1;
-            eb.push({
-              pos: { x: e.pos.x + ENEMY_W / 2, y: e.pos.y + 10 },
-              vel: { x: dir * ENEMY_BULLET_SPEED, y: 0 },
-              bornAt: now,
-            });
-            e.nextShotAt = now + 1200 + Math.random() * 700;
-          }
-        } else {
-          // Turret: stationary, aims at the player on an interval.
+        if (e.kind === "turret") {
+          // Stationary, aims at the player on an interval.
           if (now >= e.nextShotAt && e.pos.x < cam + VIEW_W + 20 && e.pos.x > cam - 20) {
             const v = aimVector(
               { x: e.pos.x + 8, y: e.pos.y },
@@ -467,10 +517,47 @@ export function JungleRunGame() {
             eb.push({ pos: { x: e.pos.x + 8, y: e.pos.y }, vel: v, bornAt: now });
             e.nextShotAt = now + 1500 + Math.random() * 700;
           }
+          continue;
         }
 
-        // Despawn walkers that drift far off the left of the camera.
-        if (e.kind !== "turret" && e.pos.x + ENEMY_W < cam - 120) {
+        // --- Walking enemies: set horizontal intent, then run physics. ---
+        if (e.kind === "runner") {
+          e.vel.x = -RUNNER_SPEED;
+        } else {
+          // Gunner: advance until in range, then halt and fire horizontally.
+          const dx = player.pos.x - e.pos.x;
+          if (Math.abs(dx) > 220) {
+            e.vel.x = -GUNNER_SPEED;
+          } else {
+            e.vel.x = 0;
+            if (now >= e.nextShotAt && e.pos.x < cam + VIEW_W) {
+              const dir = dx >= 0 ? 1 : -1;
+              eb.push({
+                pos: { x: e.pos.x + ENEMY_W / 2, y: e.pos.y + 10 },
+                vel: { x: dir * ENEMY_BULLET_SPEED, y: 0 },
+                bornAt: now,
+              });
+              e.nextShotAt = now + 1200 + Math.random() * 700;
+            }
+          }
+        }
+
+        moveEnemy(e, level.platforms);
+        if (e.vel.x !== 0 && e.onGround) e.walkPhase += 0.3;
+
+        // Drown in a water gap or fall off the bottom of the world.
+        const ecx = e.pos.x + ENEMY_W / 2;
+        const efeet = e.pos.y + ENEMY_H;
+        let gone = e.pos.y > VIEW_H + 60;
+        if (!gone) {
+          for (const w of level.water) {
+            if (ecx > w.x && ecx < w.x + w.w && efeet > w.y) { gone = true; break; }
+          }
+        }
+        // Also clean up walkers that drift off the left or overstay.
+        if (e.pos.x + ENEMY_W < cam - 140 || now - e.bornAt > ENEMY_LIFETIME_MS) gone = true;
+        if (gone) {
+          if (efeet > GROUND_Y) spawnParticles(ecx, GROUND_Y, "#bae6fd");
           enemies.splice(i, 1);
         }
       }
@@ -528,7 +615,8 @@ export function JungleRunGame() {
                 spawnParticles(boss.x + Math.random() * 44, boss.y + 20 + Math.random() * 50, "#f97316");
               }
               setRunning(false);
-              setCleared(true);
+              if (stage >= MAX_STAGES) setWon(true);
+              else setCleared(true);
               submitBest(scoreRef.current);
             }
           }
@@ -638,7 +726,7 @@ export function JungleRunGame() {
     for (const pl of level.platforms) {
       const x = pl.x - cam;
       if (x + pl.w < 0 || x > VIEW_W) continue;
-      if (pl.x === BOSS_X + 40) continue; // boss wall is drawn with the boss
+      if (pl.x === bossXRef.current + 40) continue; // boss wall is drawn with the boss
       drawTerrain(ctx, x, pl.y, pl.w, pl.h);
     }
 
@@ -692,7 +780,7 @@ export function JungleRunGame() {
     drawForeground(ctx, cam);
 
     // Progress + boss bar.
-    drawStageBar(ctx, playerRef.current.pos.x, stage);
+    drawStageBar(ctx, playerRef.current.pos.x, stage, stageWRef.current);
     if (boss && boss.alive && boss.x < cam + VIEW_W) {
       drawBossBar(ctx, boss.hp);
     }
@@ -729,12 +817,12 @@ export function JungleRunGame() {
       const k = e.key.toLowerCase();
       if (captured.has(k)) e.preventDefault();
       keysRef.current[k] = true;
-      if (!running && !over && !cleared &&
+      if (!running && !over && !cleared && !won &&
           (k === "z" || k === "x" || k === " " || k === "arrowright" || k === "d")) {
         setRunning(true);
       }
       if (k === "enter") {
-        if (over) { resetForStart(); setRunning(true); }
+        if (over || won) { resetForStart(); setRunning(true); }
         else if (cleared) { resetForNextStage(); setRunning(true); }
       }
     };
@@ -745,7 +833,7 @@ export function JungleRunGame() {
       window.removeEventListener("keydown", onDown);
       window.removeEventListener("keyup", onUp);
     };
-  }, [running, over, cleared, resetForStart, resetForNextStage]);
+  }, [running, over, cleared, won, resetForStart, resetForNextStage]);
 
   // Auto-pause on tab hide / window blur.
   useEffect(() => {
@@ -761,8 +849,8 @@ export function JungleRunGame() {
 
   const press = useCallback((k: string, down: boolean) => {
     keysRef.current[k] = down;
-    if (down && !running && !over && !cleared) setRunning(true);
-  }, [running, over, cleared]);
+    if (down && !running && !over && !cleared && !won) setRunning(true);
+  }, [running, over, cleared, won]);
 
   // ---------------------------- UI ----------------------------
 
@@ -814,7 +902,7 @@ export function JungleRunGame() {
           style={{ touchAction: "none", imageRendering: "pixelated" }}
         />
 
-        {!running && !over && !cleared && (
+        {!running && !over && !cleared && !won && (
           <Overlay>
             <p className="text-sm text-white/70">{t("game.gameStartHint")}</p>
             <p className="text-xs text-white/55 max-w-sm">
@@ -840,14 +928,26 @@ export function JungleRunGame() {
           <Overlay>
             <div className="text-2xl">🏆</div>
             <p className="text-lg font-semibold text-white">Gate destroyed — Stage {stage} clear</p>
-            <p className="text-sm text-white/65">Stage {stage + 1} sends more troops your way.</p>
+            <p className="text-sm text-white/65">Stage {stage + 1} of {MAX_STAGES} sends more troops your way.</p>
             <button onClick={handleNextStage} className={primaryBtn}>Next stage</button>
+          </Overlay>
+        )}
+        {won && (
+          <Overlay>
+            <div className="text-3xl">🎉</div>
+            <p className="text-lg font-semibold text-white">All {MAX_STAGES} stages cleared!</p>
+            <p className="text-sm font-mono text-white/55">
+              {t("game.score")}: <span className="text-white">{score}</span>
+              {" · "}
+              {t("game.best")}: <span className="text-white">{Math.max(best, score)}</span>
+            </p>
+            <button onClick={handleStart} className={primaryBtn}>Play again</button>
           </Overlay>
         )}
       </div>
 
       {/* Boss health (DOM bar under canvas as a fallback hint) */}
-      {bossActive && bossHp > 0 && !cleared && (
+      {bossActive && bossHp > 0 && !cleared && !won && (
         <div className="mt-3 mx-auto max-w-xs">
           <div className="flex items-center gap-2 text-xs font-mono text-white/60">
             <span className="text-rose-300">GATE</span>
@@ -883,9 +983,9 @@ function makePlayer(): Player {
   };
 }
 
-function makeBoss(): Boss {
+function makeBoss(bossX: number): Boss {
   return {
-    x: BOSS_X,
+    x: bossX,
     y: 150,
     hp: BOSS_HP,
     alive: true,
@@ -930,6 +1030,48 @@ function moveAndCollide(p: Player, platforms: Platform[]) {
 
 function aabb(x: number, y: number, w: number, h: number, pl: Platform): boolean {
   return x < pl.x + pl.w && x + w > pl.x && y < pl.y + pl.h && y + h > pl.y;
+}
+
+/** Top surface (smallest y) of any platform covering x, or null over a gap. */
+function groundTopAt(x: number, platforms: Platform[]): number | null {
+  let top: number | null = null;
+  for (const pl of platforms) {
+    if (x >= pl.x && x <= pl.x + pl.w) {
+      if (top == null || pl.y < top) top = pl.y;
+    }
+  }
+  return top;
+}
+
+/**
+ * Axis-separated AABB physics for a walking enemy: gravity, land on / stop at
+ * platforms. Same world rules as the player, so enemies can't walk through
+ * walls or hover over water any more.
+ */
+function moveEnemy(e: Enemy, platforms: Platform[]) {
+  const w = ENEMY_W, h = ENEMY_H;
+
+  // Horizontal.
+  e.pos.x += e.vel.x;
+  for (const pl of platforms) {
+    if (aabb(e.pos.x, e.pos.y, w, h, pl)) {
+      if (e.vel.x > 0)      e.pos.x = pl.x - w;
+      else if (e.vel.x < 0) e.pos.x = pl.x + pl.w;
+      e.vel.x = 0;
+    }
+  }
+
+  // Vertical.
+  e.vel.y = Math.min(ENEMY_MAX_FALL, e.vel.y + ENEMY_GRAVITY);
+  e.pos.y += e.vel.y;
+  e.onGround = false;
+  for (const pl of platforms) {
+    if (aabb(e.pos.x, e.pos.y, w, h, pl)) {
+      if (e.vel.y > 0) { e.pos.y = pl.y - h; e.onGround = true; }
+      else if (e.vel.y < 0) { e.pos.y = pl.y + pl.h; }
+      e.vel.y = 0;
+    }
+  }
 }
 
 function spawnBullet(p: Player, now: number, bullets: Bullet[]) {
@@ -1269,17 +1411,17 @@ function drawForeground(ctx: CanvasRenderingContext2D, cam: number) {
   }
 }
 
-function drawStageBar(ctx: CanvasRenderingContext2D, px0: number, stageN: number) {
+function drawStageBar(ctx: CanvasRenderingContext2D, px0: number, stageN: number, stageW: number) {
   const barW = 200, barH = 6, x = VIEW_W - barW - 12, y = 12;
   ctx.fillStyle = "rgba(255,255,255,0.08)";
   ctx.fillRect(x, y, barW, barH);
-  const t = Math.max(0, Math.min(1, px0 / STAGE_W));
+  const t = Math.max(0, Math.min(1, px0 / stageW));
   ctx.fillStyle = "#84cc16";
   ctx.fillRect(x, y, Math.round(barW * t), barH);
   ctx.fillStyle = "rgba(255,255,255,0.55)";
   ctx.font = "10px monospace";
   ctx.textAlign = "right";
-  ctx.fillText(`STAGE ${stageN}`, x + barW, y + 18);
+  ctx.fillText(`STAGE ${stageN} / ${MAX_STAGES}`, x + barW, y + 18);
   ctx.textAlign = "left";
 }
 
