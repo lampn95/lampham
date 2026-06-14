@@ -1407,82 +1407,235 @@ const BOSS_CORE_COLORS: Record<BossKind, [string, string, string]> = {
   fortress: ["#ecfccb", "132,204,22",  "#3f6212"],
 };
 
-function drawBoss(ctx: CanvasRenderingContext2D, boss: Boss, cam: number, now: number) {
-  // Fortress wall stays anchored at the base (the solid wall), even when the
-  // core itself moves around in front of it.
-  const wallX = boss.baseX - cam;
-  px(ctx, wallX + 34, 110, 60, GROUND_Y - 110, "#3a4250");
-  px(ctx, wallX + 34, 110, 60, 6, "#4b5563");
-  ctx.fillStyle = "#1f2733";
-  for (let yy = 120; yy < GROUND_Y; yy += 22) {
-    px(ctx, wallX + 38, yy, 3, 3, "#1f2733");
-    px(ctx, wallX + 88, yy, 3, 3, "#1f2733");
-  }
+const TAU = Math.PI * 2;
 
-  // Core (moves with boss.x/boss.y).
+/** The fixed fortress wall behind the boss: armoured panels, rivets, hazard stripe. */
+function drawBossWall(ctx: CanvasRenderingContext2D, wallX: number) {
+  const wx = wallX + 34, ww = 60, top = 104;
+  // Base plate + bevels.
+  px(ctx, wx, top, ww, GROUND_Y - top, "#39424f");
+  px(ctx, wx, top, ww, 6, "#525d6e");          // top highlight
+  px(ctx, wx + ww - 5, top, 5, GROUND_Y - top, "#2a313c"); // right shadow
+  px(ctx, wx, top, 4, GROUND_Y - top, "#475264");          // left light edge
+  // Horizontal panel seams + rivets.
+  ctx.fillStyle = "#222936";
+  for (let yy = top + 18; yy < GROUND_Y; yy += 26) {
+    px(ctx, wx + 4, yy, ww - 8, 2, "#232a36");
+    px(ctx, wx + 8, yy - 6, 3, 3, "#1b212c");
+    px(ctx, wx + ww - 11, yy - 6, 3, 3, "#1b212c");
+  }
+  // Hazard stripe near the top.
+  for (let sx = 0; sx < ww - 8; sx += 10) {
+    px(ctx, wx + 4 + sx, top + 8, 6, 5, sx % 20 === 0 ? "#f59e0b" : "#1b212c");
+  }
+}
+
+function drawBoss(ctx: CanvasRenderingContext2D, boss: Boss, cam: number, now: number) {
+  const wallX = boss.baseX - cam;
+  drawBossWall(ctx, wallX);
+
   const x = boss.x - cam;
   const y = boss.y;
-  const coreCx = x + 22;
-  const coreCy = y + 46;
+  const cx = x + 22;
+  const cy = y + 46;
   const flash = now < boss.hitFlashUntil;
   const [inner, mid, iris] = BOSS_CORE_COLORS[boss.kind];
+  const pulse = 0.5 + 0.5 * Math.sin(now / 180);
 
-  // A mount/strut linking the core back to the wall so it doesn't look detached.
-  ctx.strokeStyle = "#283041";
-  ctx.lineWidth = 6;
+  // Articulated strut linking the core to the wall (segmented, with a joint).
+  ctx.strokeStyle = "#222a38";
+  ctx.lineWidth = 8;
   ctx.beginPath();
-  ctx.moveTo(coreCx, coreCy);
-  ctx.lineTo(wallX + 40, coreCy);
+  ctx.moveTo(wallX + 40, cy);
+  ctx.lineTo(cx, cy);
   ctx.stroke();
+  ctx.strokeStyle = "#39455a";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(wallX + 40, cy - 1);
+  ctx.lineTo(cx, cy - 1);
+  ctx.stroke();
+  ctx.fillStyle = "#4b5870";
+  ctx.beginPath();
+  ctx.arc((wallX + 40 + cx) / 2, cy, 4, 0, TAU);
+  ctx.fill();
   ctx.lineWidth = 1;
 
-  // Kind-specific flourishes behind the core.
-  if (boss.kind === "pulser") {
-    ctx.strokeStyle = `rgba(${mid},0.5)`;
-    ctx.lineWidth = 3;
-    for (let k = 0; k < 6; k++) {
-      const a = boss.phase + (Math.PI * 2 * k) / 6;
-      ctx.beginPath();
-      ctx.moveTo(coreCx, coreCy);
-      ctx.lineTo(coreCx + Math.cos(a) * 30, coreCy + Math.sin(a) * 30);
-      ctx.stroke();
-    }
-    ctx.lineWidth = 1;
-  } else if (boss.kind === "hover") {
-    // Hover jets underneath.
-    ctx.fillStyle = `rgba(${mid},0.6)`;
-    const j = 6 + Math.abs(Math.sin(now / 60)) * 6;
-    px(ctx, coreCx - 12, coreCy + 18, 5, j, `rgba(${mid},0.6)`);
-    px(ctx, coreCx + 7, coreCy + 18, 5, j, `rgba(${mid},0.6)`);
+  // ---- Per-kind body drawn behind the core ----
+  ctx.save();
+  drawBossBody(ctx, boss, cx, cy, now, mid);
+  ctx.restore();
+
+  // ---- Outer glow halo ----
+  const halo = ctx.createRadialGradient(cx, cy, 6, cx, cy, 42);
+  halo.addColorStop(0, `rgba(${mid},${0.45 + pulse * 0.2})`);
+  halo.addColorStop(1, `rgba(${mid},0)`);
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 42, 0, TAU);
+  ctx.fill();
+
+  // ---- Armoured ring housing ----
+  ctx.fillStyle = "#161d29";
+  ctx.beginPath();
+  ctx.arc(cx, cy, 25, 0, TAU);
+  ctx.fill();
+  // Ring bevel: lit top-left, dark bottom-right.
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = "#3d4a5e";
+  ctx.beginPath(); ctx.arc(cx, cy, 23, Math.PI * 0.9, Math.PI * 1.95); ctx.stroke();
+  ctx.strokeStyle = "#0d121b";
+  ctx.beginPath(); ctx.arc(cx, cy, 23, Math.PI * 1.95, Math.PI * 2.9); ctx.stroke();
+  // Bolts around the ring.
+  ctx.fillStyle = "#48566c";
+  for (let k = 0; k < 8; k++) {
+    const a = (TAU * k) / 8 + 0.4;
+    ctx.beginPath();
+    ctx.arc(cx + Math.cos(a) * 23, cy + Math.sin(a) * 23, 1.8, 0, TAU);
+    ctx.fill();
   }
+  ctx.lineWidth = 1;
 
-  // Core housing.
-  px(ctx, x - 4, y + 24, 52, 44, "#283041");
-
-  // Glowing core.
-  const grad = ctx.createRadialGradient(coreCx, coreCy, 2, coreCx, coreCy, 22);
+  // ---- Glowing core orb ----
+  const grad = ctx.createRadialGradient(cx - 4, cy - 4, 2, cx, cy, 19);
   if (flash) {
-    grad.addColorStop(0, "#fff");
+    grad.addColorStop(0, "#ffffff");
     grad.addColorStop(1, "#fca5a5");
   } else {
-    const pulse = 0.5 + 0.5 * Math.sin(now / 180);
-    grad.addColorStop(0, inner);
-    grad.addColorStop(0.6, `rgba(${mid},${0.7 + pulse * 0.3})`);
+    grad.addColorStop(0, "#ffffff");
+    grad.addColorStop(0.25, inner);
+    grad.addColorStop(0.7, `rgba(${mid},${0.85 + pulse * 0.15})`);
     grad.addColorStop(1, iris);
   }
   ctx.fillStyle = grad;
   ctx.beginPath();
-  ctx.arc(coreCx, coreCy, 20, 0, Math.PI * 2);
+  ctx.arc(cx, cy, 18, 0, TAU);
   ctx.fill();
 
-  // Iris.
+  // Iris + slit pupil for a menacing "eye".
   ctx.fillStyle = flash ? "#ef4444" : iris;
   ctx.beginPath();
-  ctx.arc(coreCx, coreCy, 7, 0, Math.PI * 2);
+  ctx.arc(cx, cy, 7, 0, TAU);
+  ctx.fill();
+  ctx.fillStyle = "#0a0d14";
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, 2.4, 6, 0, 0, TAU);
   ctx.fill();
 
-  // Muzzle port aimed down-left.
-  px(ctx, x - 4, coreCy - 4, 8, 8, "#0f1620");
+  // Specular highlight.
+  ctx.fillStyle = "rgba(255,255,255,0.85)";
+  ctx.beginPath();
+  ctx.arc(cx - 6, cy - 6, 2.6, 0, TAU);
+  ctx.fill();
+}
+
+/** Kind-specific chassis drawn behind the glowing core. */
+function drawBossBody(
+  ctx: CanvasRenderingContext2D, boss: Boss, cx: number, cy: number, now: number, mid: string,
+) {
+  const metal = "#2b3444";
+  const metalLite = "#3d4a5e";
+  const metalDark = "#1a212d";
+
+  switch (boss.kind) {
+    case "gate": {
+      // Heavy twin side armour + a stubby barrel aimed down-left.
+      px(ctx, cx - 30, cy - 16, 14, 32, metal);
+      px(ctx, cx - 30, cy - 16, 14, 4, metalLite);
+      px(ctx, cx + 16, cy - 16, 14, 32, metal);
+      px(ctx, cx + 16, cy - 16, 14, 4, metalLite);
+      // Barrel.
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(Math.PI * 0.82);
+      px(ctx, -6, 0, 12, 30, metalDark);
+      px(ctx, -6, 26, 12, 5, "#0a0d14");
+      ctx.restore();
+      break;
+    }
+    case "hover": {
+      // Swept wings + twin thrusters with animated flame + blinking antenna.
+      ctx.fillStyle = metal;
+      ctx.beginPath();
+      ctx.moveTo(cx - 34, cy - 2); ctx.lineTo(cx - 8, cy - 10);
+      ctx.lineTo(cx - 8, cy + 8); ctx.lineTo(cx - 30, cy + 12); ctx.closePath(); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(cx + 34, cy - 2); ctx.lineTo(cx + 8, cy - 10);
+      ctx.lineTo(cx + 8, cy + 8); ctx.lineTo(cx + 30, cy + 12); ctx.closePath(); ctx.fill();
+      px(ctx, cx - 33, cy - 2, 24, 2, metalLite);
+      px(ctx, cx + 9, cy - 2, 24, 2, metalLite);
+      // Thrusters.
+      const j = 7 + Math.abs(Math.sin(now / 55)) * 9;
+      px(ctx, cx - 16, cy + 16, 7, 6, metalDark);
+      px(ctx, cx + 9, cy + 16, 7, 6, metalDark);
+      const flame = ctx.createLinearGradient(0, cy + 22, 0, cy + 22 + j);
+      flame.addColorStop(0, `rgba(${mid},0.9)`);
+      flame.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = flame;
+      px(ctx, cx - 15, cy + 22, 5, j, `rgba(${mid},0.7)`);
+      px(ctx, cx + 10, cy + 22, 5, j, `rgba(${mid},0.7)`);
+      // Antenna + blinking light.
+      px(ctx, cx - 1, cy - 32, 2, 12, metalLite);
+      ctx.fillStyle = Math.floor(now / 300) % 2 === 0 ? "#fca5a5" : "#7f1d1d";
+      ctx.beginPath(); ctx.arc(cx, cy - 33, 2.5, 0, TAU); ctx.fill();
+      break;
+    }
+    case "strider": {
+      // Core rides a piston rail-leg with hazard chevrons.
+      px(ctx, cx - 8, cy + 14, 16, 10, metal);
+      px(ctx, cx - 5, cy + 24, 10, 26, metalDark);   // piston shaft
+      px(ctx, cx - 3, cy + 24, 4, 26, metalLite);
+      px(ctx, cx - 12, cy + 48, 24, 6, metal);        // foot
+      for (let s = 0; s < 3; s++) {
+        px(ctx, cx - 7 + s * 6, cy + 16, 4, 3, s % 2 === 0 ? "#f59e0b" : "#1b212c");
+      }
+      break;
+    }
+    case "pulser": {
+      // Rotating energy ring + spokes + orbiting nodes.
+      ctx.strokeStyle = `rgba(${mid},0.45)`;
+      ctx.lineWidth = 3;
+      for (let k = 0; k < 6; k++) {
+        const a = boss.phase + (TAU * k) / 6;
+        ctx.beginPath();
+        ctx.moveTo(cx + Math.cos(a) * 12, cy + Math.sin(a) * 12);
+        ctx.lineTo(cx + Math.cos(a) * 34, cy + Math.sin(a) * 34);
+        ctx.stroke();
+      }
+      ctx.strokeStyle = `rgba(${mid},0.7)`;
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(cx, cy, 32, 0, TAU); ctx.stroke();
+      ctx.fillStyle = `rgba(${mid},0.9)`;
+      for (let k = 0; k < 3; k++) {
+        const a = -boss.phase * 1.5 + (TAU * k) / 3;
+        ctx.beginPath();
+        ctx.arc(cx + Math.cos(a) * 32, cy + Math.sin(a) * 32, 3.5, 0, TAU);
+        ctx.fill();
+      }
+      ctx.lineWidth = 1;
+      break;
+    }
+    case "fortress": {
+      // Heavy hex bunker plate + three gun ports around the core.
+      ctx.fillStyle = metal;
+      ctx.beginPath();
+      for (let k = 0; k < 6; k++) {
+        const a = (TAU * k) / 6 + Math.PI / 6;
+        const px0 = cx + Math.cos(a) * 32, py0 = cy + Math.sin(a) * 32;
+        if (k === 0) ctx.moveTo(px0, py0); else ctx.lineTo(px0, py0);
+      }
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = metalLite; ctx.lineWidth = 2; ctx.stroke();
+      ctx.lineWidth = 1;
+      ctx.fillStyle = "#0a0d14";
+      for (const a of [Math.PI * 0.75, Math.PI, Math.PI * 1.25]) {
+        ctx.beginPath();
+        ctx.arc(cx + Math.cos(a) * 26, cy + Math.sin(a) * 26, 4, 0, TAU);
+        ctx.fill();
+      }
+      break;
+    }
+  }
 }
 
 function drawParallax(
