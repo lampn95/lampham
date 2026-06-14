@@ -506,7 +506,9 @@ export function JungleRunGame() {
       // Only spawn where there's solid ground just off the right edge so they
       // don't materialise mid-air over a chasm.
       const bossOnScreen = bossRef.current && bossRef.current.x < cam + VIEW_W;
-      const walkers = enemiesRef.current.filter((e) => e.kind !== "turret").length;
+      const walkers = enemiesRef.current.filter(
+        (e) => e.kind === "runner" || e.kind === "gunner",
+      ).length;
       if (!bossOnScreen && now >= nextSpawnRef.current && walkers < 5) {
         const kind: EnemyKind = Math.random() < 0.45 ? "gunner" : "runner";
         const x = cam + VIEW_W + 24 + Math.random() * 60;
