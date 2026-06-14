@@ -56,7 +56,13 @@ const ENEMY_BULLET_LIFE_MS = 2600;
 const SPAWN_INTERVAL_MIN_MS = 1100;
 const SPAWN_INTERVAL_MAX_MS = 1900;
 
-const START_LIVES = 3;
+const START_LIVES = 3;       // Normal mode
+const FUNNY_LIVES = 1000;    // "Super Funny" test mode
+
+type Mode = "normal" | "funny";
+function livesForMode(m: Mode): number {
+  return m === "funny" ? FUNNY_LIVES : START_LIVES;
+}
 const INVULN_MS = 1500;
 
 const BOSS_HP = 24;
@@ -205,6 +211,7 @@ export function JungleRunGame() {
   const lastSafeXRef = useRef(30);
   const livesRef     = useRef(START_LIVES);
   const scoreRef     = useRef(0);
+  const modeRef      = useRef<Mode>("normal");
   const particlesRef = useRef<{ x: number; y: number; vx: number; vy: number; born: number; color: string }[]>([]);
 
   const [score, setScore]   = useState(0);
@@ -215,6 +222,7 @@ export function JungleRunGame() {
   const [running, setRunning] = useState(false);
   const [over, setOver]     = useState(false);
   const [cleared, setCleared] = useState(false);
+  const [mode, setMode]     = useState<Mode>("normal");
 
   // ---------------------------- Reset ----------------------------
 
@@ -237,10 +245,11 @@ export function JungleRunGame() {
   }, []);
 
   const resetForStart = useCallback(() => {
-    livesRef.current = START_LIVES;
+    const startLives = livesForMode(modeRef.current);
+    livesRef.current = startLives;
     scoreRef.current = 0;
     setScore(0);
-    setLives(START_LIVES);
+    setLives(startLives);
     setStage(1);
     setOver(false);
     loadStage();
@@ -759,6 +768,7 @@ export function JungleRunGame() {
 
   const handleStart = () => { resetForStart(); setRunning(true); };
   const handleNextStage = () => { resetForNextStage(); setRunning(true); };
+  const pickMode = (m: Mode) => { modeRef.current = m; setMode(m); };
 
   // Refs (level, boss, turret flags) are seeded at creation, so the first
   // paint just needs a draw — loadStage() only runs on start / next-stage to
@@ -777,8 +787,14 @@ export function JungleRunGame() {
             <span className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-1.5">
               <span className="text-white/45">Lives: </span>
               <span className="text-white font-semibold">
-                {"❤".repeat(Math.max(0, lives))}
-                <span className="text-white/15">{"❤".repeat(Math.max(0, START_LIVES - lives))}</span>
+                {mode === "funny" ? (
+                  <>🤪 {lives}</>
+                ) : (
+                  <>
+                    {"❤".repeat(Math.max(0, lives))}
+                    <span className="text-white/15">{"❤".repeat(Math.max(0, START_LIVES - lives))}</span>
+                  </>
+                )}
               </span>
             </span>
             <span className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-1.5">
@@ -804,6 +820,7 @@ export function JungleRunGame() {
             <p className="text-xs text-white/55 max-w-sm">
               ↑↓←→ / WASD = move · Z = jump · X = shoot · ↑+X aim up · ↓ crouch
             </p>
+            <ModeToggle mode={mode} onPick={pickMode} />
             <button onClick={handleStart} className={primaryBtn}>{t("game.start")}</button>
           </Overlay>
         )}
@@ -1297,6 +1314,30 @@ function Overlay({ children }: { children: React.ReactNode }) {
 
 const primaryBtn =
   "mt-2 inline-flex h-10 items-center gap-2 rounded-full bg-white text-black px-5 text-sm font-medium hover:bg-white/90 transition-colors";
+
+function ModeToggle({ mode, onPick }: { mode: Mode; onPick: (m: Mode) => void }) {
+  const opt = (m: Mode) =>
+    `px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+      mode === m
+        ? "bg-white text-black"
+        : "text-white/70 hover:text-white hover:bg-white/10"
+    }`;
+  return (
+    <div className="flex flex-col items-center gap-1.5">
+      <div className="inline-flex gap-1 rounded-xl border border-white/15 bg-white/[0.04] p-1">
+        <button className={opt("normal")} onClick={() => onPick("normal")}>
+          Normal · 3 ❤
+        </button>
+        <button className={opt("funny")} onClick={() => onPick("funny")}>
+          🤪 Super Funny · 1000 ❤
+        </button>
+      </div>
+      {mode === "funny" && (
+        <p className="text-[11px] text-amber-300/80">Test mode — basically unkillable.</p>
+      )}
+    </div>
+  );
+}
 
 function MobileControls({ onPress }: { onPress: (k: string, down: boolean) => void }) {
   const btn =
