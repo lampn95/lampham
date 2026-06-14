@@ -166,18 +166,28 @@ function buildLevel(stage: number): Level {
   const turrets: Vec[] = [];
 
   const ledgeOffsets = [42, 56, 72, 86];
-  const numGaps = Math.min(2 + Math.floor(stage / 2), 6);  // 2 → 6 gaps
+  const numGaps = Math.min(3 + Math.floor(stage / 2), 8);  // 3 → 8 gaps (longer stages)
   const turretBias = 0.32 + stage * 0.05;
+
+  // Drops one or two cover ledges / crates onto a segment that starts at `sx`.
+  const addLedges = (sx: number, sw: number, count: number) => {
+    for (let k = 0; k < count; k++) {
+      const lw = randInt(80, 130);
+      const maxStart = Math.max(20, sw - lw - 20);
+      platforms.push({
+        x: sx + randInt(20, maxStart),
+        y: GROUND_Y - ledgeOffsets[randInt(0, ledgeOffsets.length - 1)],
+        w: lw, h: 14,
+      });
+    }
+  };
 
   let x = 0;
 
-  // Opening safe run-up (no enemies/turrets right at the spawn).
-  let segW = randInt(360, 480);
+  // Opening safe run-up (longer, no enemies/turrets right at the spawn).
+  let segW = randInt(520, 680);
   platforms.push({ x, y: GROUND_Y, w: segW, h: groundH });
-  if (rng() < 0.7) {
-    const lw = randInt(80, 120);
-    platforms.push({ x: x + randInt(120, segW - lw - 20), y: GROUND_Y - ledgeOffsets[randInt(0, 2)], w: lw, h: 14 });
-  }
+  addLedges(x, segW, rng() < 0.8 ? 2 : 1);
   x += segW;
 
   for (let g = 0; g < numGaps; g++) {
@@ -186,20 +196,13 @@ function buildLevel(stage: number): Level {
     water.push({ x, y: GROUND_Y + 4, w: gap, h: VIEW_H - GROUND_Y - 4 });
     x += gap;
 
-    // Solid landing island at ground level (always reachable).
-    segW = randInt(220, 400);
+    // Solid landing island at ground level (always reachable), now wider.
+    segW = randInt(320, 560);
     platforms.push({ x, y: GROUND_Y, w: segW, h: groundH });
 
-    // Optional elevated ledge / crate for cover + verticality.
-    if (rng() < 0.6) {
-      const lw = randInt(70, 120);
-      const maxStart = Math.max(20, segW - lw - 20);
-      platforms.push({
-        x: x + randInt(20, maxStart),
-        y: GROUND_Y - ledgeOffsets[randInt(0, ledgeOffsets.length - 1)],
-        w: lw, h: 14,
-      });
-    }
+    // Cover ledges / crates for verticality (1–2 on wider islands).
+    if (rng() < 0.7) addLedges(x, segW, segW > 440 && rng() < 0.5 ? 2 : 1);
+
     // Turret on this island (scales with stage).
     if (rng() < turretBias) {
       turrets.push({ x: x + randInt(40, segW - 40), y: GROUND_Y - 18 });
@@ -207,12 +210,10 @@ function buildLevel(stage: number): Level {
     x += segW;
   }
 
-  // Final run-up to the boss.
-  const bossRunW = randInt(360, 460);
+  // Final run-up to the boss (longer).
+  const bossRunW = randInt(520, 660);
   platforms.push({ x, y: GROUND_Y, w: bossRunW, h: groundH });
-  if (rng() < 0.6) {
-    platforms.push({ x: x + randInt(60, bossRunW - 140), y: GROUND_Y - ledgeOffsets[randInt(0, 2)], w: 90, h: 14 });
-  }
+  addLedges(x, bossRunW - 60, rng() < 0.6 ? 2 : 1);
   if (rng() < turretBias) {
     turrets.push({ x: x + randInt(60, bossRunW - 80), y: GROUND_Y - 18 });
   }
