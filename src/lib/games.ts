@@ -109,6 +109,22 @@ export const games: Game[] = [
     accent: "from-sky-400 via-cyan-300 to-emerald-300",
   },
   {
+    slug: "contra",
+    emoji: "🎯",
+    title: { en: "Jungle Run",                      vi: "Jungle Run" },
+    blurb: {
+      en: "A clean-room tribute to the 8-bit run-and-gun. Original art & code — sprint, jump, shoot 5 ways, dodge turrets, blow the gate.",
+      vi: "Một bản tri ân clean-room cho dòng run-and-gun 8-bit. Sprite & code 100% tự viết — chạy, nhảy, bắn 5 hướng, né pháo, phá cổng.",
+    },
+    controls: {
+      en: "Arrow keys / WASD to move · Z to jump · X to shoot · ↑+X aims up · ↓ crouch",
+      vi: "Mũi tên / WASD để di chuyển · Z để nhảy · X để bắn · ↑+X bắn lên · ↓ ngồi xuống",
+    },
+    highScoreKey: "lampham-contra-best",
+    highScoreLabel: { en: "enemies down",           vi: "địch hạ" },
+    accent: "from-lime-400 via-emerald-500 to-teal-500",
+  },
+  {
     slug: "mario",
     emoji: "🍄",
     title: { en: "Super Mario Bros 1-1",            vi: "Super Mario Bros 1-1" },
