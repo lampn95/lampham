@@ -76,6 +76,7 @@ type Player = {
   invulnUntil: number;
   runPhase: number;     // accumulates while running → leg swing
   lastShotAt: number;   // for muzzle flash
+  h: number;            // current bounding-box height (stand vs crouch)
 };
 
 type Bullet = {
@@ -265,7 +266,9 @@ export function JungleRunGame() {
       submitBest(scoreRef.current);
       return;
     }
-    // Respawn at the last safe ground tile, with i-frames.
+    // Respawn at the last safe ground tile, standing, with i-frames.
+    p.crouch = false;
+    p.h = PLAYER_H;
     p.pos.x = lastSafeXRef.current;
     p.pos.y = GROUND_Y - PLAYER_H - 1;
     p.vel.x = 0;
@@ -506,10 +509,11 @@ export function JungleRunGame() {
         if (consumed) bullets.splice(i, 1);
       }
 
-      // Enemy bullets ↔ player.
+      // Enemy bullets ↔ player. (pos.y is already the box top; crouching
+      // shrinks the hitbox so you can duck under horizontal fire.)
       if (now > player.invulnUntil) {
-        const pH = player.crouch ? PLAYER_H_CROUCH : PLAYER_H;
-        const pY = player.pos.y + (PLAYER_H - pH);
+        const pH = player.h;
+        const pY = player.pos.y;
         for (let i = eb.length - 1; i >= 0; i--) {
           const b = eb[i];
           if (b.pos.x >= player.pos.x && b.pos.x <= player.pos.x + PLAYER_W &&
@@ -523,8 +527,8 @@ export function JungleRunGame() {
 
       // Enemy bodies ↔ player.
       if (now > player.invulnUntil) {
-        const pH = player.crouch ? PLAYER_H_CROUCH : PLAYER_H;
-        const pY = player.pos.y + (PLAYER_H - pH);
+        const pH = player.h;
+        const pY = player.pos.y;
         for (const e of enemies) {
           if (!e.alive) continue;
           if (player.pos.x < e.pos.x + ENEMY_W && player.pos.x + PLAYER_W > e.pos.x &&
@@ -840,6 +844,7 @@ function makePlayer(): Player {
     invulnUntil: 0,
     runPhase: 0,
     lastShotAt: -9999,
+    h: PLAYER_H,
   };
 }
 
@@ -856,9 +861,17 @@ function makeBoss(): Boss {
 
 function moveAndCollide(p: Player, platforms: Platform[]) {
   const w = PLAYER_W;
-  const h = p.crouch ? PLAYER_H_CROUCH : PLAYER_H;
-  const feetY = p.pos.y + (p.crouch ? PLAYER_H_CROUCH : PLAYER_H);
-  p.pos.y = feetY - h;
+  // pos.y is the TOP of the current bounding box. When the crouch state
+  // toggles, the box height changes — keep the FEET anchored by shifting the
+  // top by the height delta (otherwise the player sinks into / pops out of
+  // the floor, which previously let a crouch on the thin bridge drop you into
+  // the river).
+  const newH = p.crouch ? PLAYER_H_CROUCH : PLAYER_H;
+  if (newH !== p.h) {
+    p.pos.y += p.h - newH;
+    p.h = newH;
+  }
+  const h = newH;
 
   p.pos.x += p.vel.x;
   for (const pl of platforms) {
@@ -903,7 +916,7 @@ function muzzlePoint(p: Player): Vec {
   if (p.aimUp) {
     return { x: cx + p.facing * 10, y: p.pos.y - 2 };
   }
-  const gunY = p.pos.y + (p.crouch ? PLAYER_H - 10 : 14);
+  const gunY = p.pos.y + (p.crouch ? 12 : 14);
   return { x: cx + p.facing * 12, y: gunY };
 }
 
@@ -956,14 +969,14 @@ function px(
 
 function drawPlayer(ctx: CanvasRenderingContext2D, p: Player, cam: number, now: number) {
   const baseX = p.pos.x - cam;
-  const h = p.crouch ? PLAYER_H_CROUCH : PLAYER_H;
-  const y = p.pos.y + (PLAYER_H - h);
+  const h = p.h;            // pos.y is the box top; sprite is drawn from there
+  const y = p.pos.y;
   const f = p.facing;
 
-  // Ground shadow.
+  // Ground shadow sits at the feet (box bottom).
   ctx.fillStyle = "rgba(0,0,0,0.3)";
   ctx.beginPath();
-  ctx.ellipse(baseX + PLAYER_W / 2, p.pos.y + PLAYER_H + 1, PLAYER_W / 2, 3, 0, 0, Math.PI * 2);
+  ctx.ellipse(baseX + PLAYER_W / 2, p.pos.y + h + 1, PLAYER_W / 2, 3, 0, 0, Math.PI * 2);
   ctx.fill();
 
   // I-frame flicker.
