@@ -78,10 +78,10 @@ export const translations = {
   // ===== Books section =====
   // Per-book copy lives in src/lib/books.ts. Only the section heading is here.
   "book.eyebrow":     { en: "Note · Books",  vi: "Note · Books" },
-  "book.title":       { en: "A couple of books I helped write.",
+  "book.title":       { en: "A few books I helped write.",
                         vi: "Vài cuốn sách mình đã đồng tác giả." },
-  "book.description": { en: "Two free books on technical-interview prep — coding patterns and system design — co-written under the EngineerPro umbrella.",
-                        vi: "Hai cuốn sách miễn phí về phỏng vấn kỹ thuật — coding patterns và system design — đồng biên soạn dưới sự bảo trợ của EngineerPro." },
+  "book.description": { en: "Books on technical-interview prep — coding patterns, system design, real Big-Tech CVs, and an interview & career playbook — co-written under the EngineerPro umbrella.",
+                        vi: "Những cuốn sách về phỏng vấn kỹ thuật — coding patterns, system design, CV thật đậu Big Tech, và cẩm nang phỏng vấn & sự nghiệp — đồng biên soạn dưới sự bảo trợ của EngineerPro." },
 
   // ===== Podcast section =====
   "podcast.eyebrow":     { en: "Podcast · Notes by voice",
